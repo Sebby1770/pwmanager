@@ -18,7 +18,7 @@ Features
 - Encrypted export / import for backups
 - Vault file integrity check
 - Interactive menu OR one-shot CLI subcommands
-- Best-effort secure wipe of sensitive strings in memory
+- Best-effort secure wipe of mutable sensitive buffers in memory
 
 Usage
 -----
@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import ctypes
 import getpass
 import hashlib
 import hmac
@@ -117,22 +116,14 @@ class C:
 # =============================================================================
 
 def secure_wipe(data: Any) -> None:
-    """Best-effort overwrite of a bytes/bytearray buffer in memory.
+    """Best-effort overwrite of a mutable bytearray buffer in memory.
 
-    Python strings are immutable so true wiping is impossible — for sensitive
-    values we accept this and rely on the OS process boundary. For bytearrays
-    we can actually zero the buffer.
+    Python strings and bytes are immutable, so true wiping is not safely
+    available for them. For bytearrays we can actually zero the buffer.
     """
     if isinstance(data, bytearray):
         for i in range(len(data)):
             data[i] = 0
-    elif isinstance(data, bytes):
-        # Try to zero via ctypes — works on CPython but is unsafe in general.
-        try:
-            buf = (ctypes.c_char * len(data)).from_address(id(data) + bytes.__basicsize__ - 1)
-            ctypes.memset(ctypes.addressof(buf), 0, len(data))
-        except Exception:
-            pass
 
 
 # =============================================================================

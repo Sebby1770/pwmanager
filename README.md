@@ -85,7 +85,9 @@ Each entry stores: `username`, `password`, `url`, `notes`, `tags`, `totp_secret`
 - The master password is **never** stored. Forget it and the vault is unrecoverable — this is by design.
 - Argon2id parameters are time=3, memory=64 MiB, parallelism=4. Bump them in the source if you want it slower/stronger.
 - PBKDF2 fallback uses 600,000 iterations of HMAC-SHA256.
-- Decrypted entries live in process memory while the program runs. Best-effort `secure_wipe` zeroes the key on lock, but Python strings are immutable so plaintext passwords cannot be guaranteed to be wiped.
+- Decrypted entries live in process memory while the program runs. Best-effort
+  `secure_wipe` only zeroes mutable `bytearray` buffers; Python strings and
+  bytes cannot be safely wiped from user-space code.
 - Auto-lock and clipboard auto-clear reduce the window of exposure but are not a substitute for a clean machine.
 - This is a learning/hobby tool. For high-stakes use, prefer Bitwarden / 1Password / KeePassXC, which have years of audit history and hardened memory handling.
 
