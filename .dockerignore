@@ -1,0 +1,15 @@
+.git
+.github
+tests
+*.md
+!README.md
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+vault.json
+vault.db
+*.log
+dist
+build
+*.egg-info
