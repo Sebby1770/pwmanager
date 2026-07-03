@@ -3,6 +3,28 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] — 2026-07-03
+
+### Security
+- **Persistent unlock lockout.** Failed attempts are now recorded in an
+  owner-only sidecar file (`<vault>.throttle`), so the exponential cooldown
+  (30s after the 5th failure, doubling per failure, capped at 1h) **survives
+  process restarts** — previously an attacker could reset the counter by
+  simply re-running the program. A successful unlock clears it.
+
+### Added
+- **`pwmanager audit`** — a password health report (also menu option `a`):
+  - **reused passwords** (groups of entries sharing one password),
+  - **weak passwords** (< 50 bits of estimated entropy),
+  - **stale passwords** (not rotated in over a year),
+  - opt-in **HaveIBeenPwned breach check** (`--hibp`) via the k-anonymity
+    range API: only the first 5 hex chars of each password's SHA-1 ever leave
+    the machine; matching happens locally. Injectable fetcher, fully tested
+    offline.
+- Six new tests (25 total): throttle persistence across instances, exponential
+  backoff and reset, sidecar file permissions, audit analysis of reuse/weak/
+  stale, and HIBP prefix privacy + response parsing.
+
 ## [2.0.0] — 2026-07-02
 
 Hardening + packaging release. The tool is still a single, dependency-light

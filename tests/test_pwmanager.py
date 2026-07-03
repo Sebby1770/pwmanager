@@ -185,6 +185,78 @@ def test_encrypted_export_import_roundtrip(tmp_path):
     assert dest.entries["spotify"].password == "pw123"
 
 
+# ----------------------------- persistent lockout -----------------------------
+
+def test_throttle_allows_until_max_failures(tmp_path):
+    t = pw.Throttle(str(tmp_path / "v.json"))
+    assert t.seconds_remaining() == 0
+    for _ in range(pw.MAX_UNLOCK_ATTEMPTS - 1):
+        t.record_failure()
+    assert t.seconds_remaining() == 0  # still under the limit
+
+
+def test_throttle_locks_after_max_failures_and_persists(tmp_path):
+    path = str(tmp_path / "v.json")
+    t = pw.Throttle(path)
+    for _ in range(pw.MAX_UNLOCK_ATTEMPTS):
+        t.record_failure()
+    wait = t.seconds_remaining()
+    assert 0 < wait <= pw.LOCKOUT_BASE_SECONDS
+    # A brand-new instance (fresh process) sees the same lockout — that's the fix.
+    assert pw.Throttle(path).seconds_remaining() == wait
+    # The sidecar is owner-only.
+    assert os.stat(path + ".throttle").st_mode & 0o777 == 0o600
+
+
+def test_throttle_backoff_doubles_and_reset_clears(tmp_path):
+    t = pw.Throttle(str(tmp_path / "v.json"))
+    for _ in range(pw.MAX_UNLOCK_ATTEMPTS):
+        t.record_failure()
+    first = t.seconds_remaining()
+    t.record_failure()
+    assert t.seconds_remaining() > first  # exponential growth
+    t.reset()
+    assert t.seconds_remaining() == 0
+
+
+# ----------------------------- audit -----------------------------
+
+def test_analyze_entries_flags_reuse_weak_and_stale():
+    year_and_a_bit = pw.time.time() - 400 * 86400
+    entries = {
+        "github": pw.Entry(password="Sup3r-Long-Unique-Passw0rd!x"),
+        "gitlab": pw.Entry(password="shared-secret-pw-123"),
+        "bitbucket": pw.Entry(password="shared-secret-pw-123"),
+        "oldsite": pw.Entry(password="An0ther-Unique-Passw0rd!zz", updated_at=year_and_a_bit),
+        "weakone": pw.Entry(password="abc"),
+    }
+    findings = pw.analyze_entries(entries)
+    assert findings["reused"] == [["bitbucket", "gitlab"]]
+    assert "weakone" in findings["weak"]
+    assert "github" not in findings["weak"]
+    assert findings["stale"] == ["oldsite"]
+
+
+def test_hibp_sends_only_five_char_prefix_and_parses_count():
+    import hashlib as _hashlib
+
+    password = "password123"
+    digest = _hashlib.sha1(password.encode()).hexdigest().upper()
+    seen = {}
+
+    def fake_fetch(prefix):
+        seen["prefix"] = prefix
+        return f"0018A45C4D1DEF81644B54AB7F969B88D65:3\n{digest[5:]}:42\n"
+
+    assert pw.hibp_breach_count(password, fetch=fake_fetch) == 42
+    assert seen["prefix"] == digest[:5]
+    assert len(seen["prefix"]) == 5  # k-anonymity: only the prefix leaves
+
+
+def test_hibp_returns_zero_when_absent():
+    assert pw.hibp_breach_count("uncrackable", fetch=lambda p: "AAAA:1\nBBBB:2\n") == 0
+
+
 def test_search_finds_by_tag_and_name(tmp_path):
     path = str(tmp_path / "vault.json")
     v = pw.Vault(path, backend="json")

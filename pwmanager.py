@@ -14,7 +14,9 @@ Features
 - TOTP (RFC 6238) secret storage and live code generation
 - Clipboard copy with auto-clear after N seconds
 - Auto-lock after inactivity timeout
-- Failed-unlock lockout with exponential backoff
+- Failed-unlock lockout with exponential backoff — persisted across restarts
+- Vault audit: reused / weak / stale passwords, plus an opt-in HaveIBeenPwned
+  breach check via the k-anonymity API (only 5-char hash prefixes leave)
 - Encrypted export / import for backups
 - Enforced HMAC integrity check (unlock is refused if the file was tampered with)
 - Pluggable storage: a JSON file or an embedded SQLite database (--backend sqlite)
@@ -28,6 +30,7 @@ Usage
     python pwmanager.py                    # interactive menu
     python pwmanager.py add github         # one-shot add
     python pwmanager.py gen --length 24    # generate a password
+    python pwmanager.py audit --hibp       # password health + breach check
     python pwmanager.py --backend sqlite   # use the embedded SQLite backend
     python pwmanager.py --log-file audit.log view   # with an audit trail
     python pwmanager.py --help             # full help
@@ -55,7 +58,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -129,6 +132,74 @@ def setup_logging(log_file: Optional[str] = None, verbose: bool = False) -> None
 
 class IntegrityError(Exception):
     """Raised when a vault's authentication tag does not match its contents."""
+
+
+# =============================================================================
+# Persistent unlock throttle
+# =============================================================================
+
+LOCKOUT_BASE_SECONDS = 30
+LOCKOUT_MAX_SECONDS = 3600
+
+
+class Throttle:
+    """Persist failed-unlock state in a sidecar file next to the vault.
+
+    Pre-2.1 the failed-attempt counter lived in process memory, so an attacker
+    could dodge the lockout by simply restarting the program. This records
+    failures on disk (owner-only) and enforces an exponential cooldown that
+    survives restarts: 30s after the 5th failure, doubling per failure, capped
+    at an hour. A successful unlock clears it.
+    """
+
+    def __init__(self, vault_path: str):
+        self.path = vault_path + ".throttle"
+
+    def _read(self) -> dict:
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"fails": 0, "last_fail": 0.0}
+            return data
+        except (OSError, ValueError):
+            return {"fails": 0, "last_fail": 0.0}
+
+    def seconds_remaining(self) -> int:
+        """Seconds of cooldown left, or 0 if unlocking is currently allowed."""
+        state = self._read()
+        fails = int(state.get("fails", 0))
+        if fails < MAX_UNLOCK_ATTEMPTS:
+            return 0
+        wait = min(
+            LOCKOUT_BASE_SECONDS * (2 ** (fails - MAX_UNLOCK_ATTEMPTS)),
+            LOCKOUT_MAX_SECONDS,
+        )
+        remaining = float(state.get("last_fail", 0.0)) + wait - time.time()
+        if remaining <= 0:
+            return 0
+        return int(remaining) + 1  # ceil, so we never report 0 while locked
+
+    def record_failure(self) -> int:
+        """Record one failed unlock; returns the cumulative failure count."""
+        state = self._read()
+        state["fails"] = int(state.get("fails", 0)) + 1
+        state["last_fail"] = time.time()
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, self.path)
+        try:
+            os.chmod(self.path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+        return int(state["fails"])
+
+    def reset(self) -> None:
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
 
 # ANSI colors (auto-disabled if not a TTY)
 class C:
@@ -330,6 +401,70 @@ def strength_label(bits: float) -> str:
     if bits < 70: return C.yellow("Reasonable")
     if bits < 90: return C.green("Strong")
     return C.green(C.bold("Very strong"))
+
+
+# =============================================================================
+# Vault audit (password health)
+# =============================================================================
+
+WEAK_BITS_THRESHOLD = 50
+STALE_AFTER_DAYS = 365
+
+
+def analyze_entries(entries: Dict[str, "Entry"]) -> Dict[str, Any]:
+    """Pure audit pass over the decrypted entries (no network, no mutation).
+
+    Returns {"reused": [[names sharing a password], ...],
+             "weak":   [names with < WEAK_BITS_THRESHOLD bits of entropy],
+             "stale":  [names not updated in STALE_AFTER_DAYS days]}.
+    """
+    by_password: Dict[str, List[str]] = {}
+    weak: List[str] = []
+    stale: List[str] = []
+    now = time.time()
+    for name, e in entries.items():
+        if e.password:
+            by_password.setdefault(e.password, []).append(name)
+            if password_entropy_bits(e.password) < WEAK_BITS_THRESHOLD:
+                weak.append(name)
+        if now - e.updated_at > STALE_AFTER_DAYS * 86400:
+            stale.append(name)
+    reused = sorted(sorted(names) for names in by_password.values() if len(names) > 1)
+    return {"reused": reused, "weak": sorted(weak), "stale": sorted(stale)}
+
+
+def _hibp_fetch(prefix: str) -> str:
+    """Fetch one k-anonymity range from HaveIBeenPwned (network)."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"https://api.pwnedpasswords.com/range/{prefix}",
+        headers={"User-Agent": "pwmanager-audit"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def hibp_breach_count(
+    password: str, fetch: Optional[Callable[[str], str]] = None
+) -> int:
+    """How many breaches this password appears in, via HIBP's k-anonymity API.
+
+    Privacy property: only the first 5 hex chars of the password's SHA-1 ever
+    leave the machine; the full hash is matched locally against the returned
+    suffix list. Returns 0 when not found. `fetch` is injectable for tests.
+    """
+    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    prefix, suffix = digest[:5], digest[5:]
+    body = (fetch or _hibp_fetch)(prefix)
+    for line in body.splitlines():
+        candidate, _, count = line.strip().partition(":")
+        if candidate.upper() == suffix:
+            try:
+                return int(count.strip() or 0)
+            except ValueError:
+                return 1
+    return 0
 
 
 # =============================================================================
@@ -831,6 +966,15 @@ def unlock_or_create(vault: Vault) -> bool:
         print(C.green("Vault created.\n"))
         return True
 
+    # Persistent lockout: failures are recorded on disk, so restarting the
+    # program does not reset the cooldown.
+    throttle = Throttle(vault.path)
+    wait = throttle.seconds_remaining()
+    if wait > 0:
+        LOG.error("unlock refused: lockout active (%ds remaining)", wait)
+        print(C.red(f"Locked out after too many failed attempts. Try again in {wait}s."))
+        return False
+
     backoff = 1.0
     for attempt in range(1, MAX_UNLOCK_ATTEMPTS + 1):
         pw = prompt_secret("Master password")
@@ -838,6 +982,7 @@ def unlock_or_create(vault: Vault) -> bool:
             return False
         try:
             vault.unlock(pw)
+            throttle.reset()
             print(C.green(f"Vault unlocked. {len(vault.entries)} entries.") +
                   C.dim(f" (KDF: {vault.kdf_used})\n"))
             return True
@@ -845,8 +990,10 @@ def unlock_or_create(vault: Vault) -> bool:
             print(C.red(f"Refusing to unlock: {e}\n"))
             return False
         except InvalidToken:
+            fails = throttle.record_failure()
             remaining = MAX_UNLOCK_ATTEMPTS - attempt
-            LOG.warning("failed unlock attempt %d/%d", attempt, MAX_UNLOCK_ATTEMPTS)
+            LOG.warning("failed unlock attempt %d/%d (%d on record)",
+                        attempt, MAX_UNLOCK_ATTEMPTS, fails)
             print(C.red(f"Wrong password. {remaining} attempt(s) left."))
             if remaining > 0:
                 time.sleep(backoff)
@@ -854,8 +1001,9 @@ def unlock_or_create(vault: Vault) -> bool:
         except (ValueError, FileNotFoundError) as e:
             print(C.red(f"Error: {e}"))
             return False
+    wait = throttle.seconds_remaining()
     LOG.error("locked out after %d failed attempts", MAX_UNLOCK_ATTEMPTS)
-    print(C.red("Too many failed attempts. Locked out."))
+    print(C.red(f"Too many failed attempts. Locked out for {wait}s (persists across restarts)."))
     return False
 
 
@@ -1050,6 +1198,70 @@ def cmd_generate() -> None:
             print(C.green(f"Copied. Auto-clear in {CLIPBOARD_CLEAR_SECONDS}s.\n"))
 
 
+def cmd_audit(vault: Vault, hibp: Optional[bool] = None) -> None:
+    """Password health report: reuse, weak, stale — and optional breach check."""
+    if not vault.entries:
+        print(C.dim("Vault is empty.\n"))
+        return
+
+    findings = analyze_entries(vault.entries)
+    print(C.bold(f"\nAudit — {len(vault.entries)} entries"))
+
+    if findings["reused"]:
+        print(C.red(f"\n  Reused passwords ({len(findings['reused'])} group(s)):"))
+        for group in findings["reused"]:
+            print(f"    • {', '.join(group)}")
+    else:
+        print(C.green("\n  ✓ No reused passwords"))
+
+    if findings["weak"]:
+        print(C.yellow(f"\n  Weak passwords (< {WEAK_BITS_THRESHOLD} bits):"))
+        for name in findings["weak"]:
+            bits = password_entropy_bits(vault.entries[name].password)
+            print(f"    • {name} ({bits:.0f} bits)")
+    else:
+        print(C.green("  ✓ No weak passwords"))
+
+    if findings["stale"]:
+        print(C.yellow("\n  Not rotated in over a year:"))
+        for name in findings["stale"]:
+            print(f"    • {name}")
+    else:
+        print(C.green("  ✓ No stale passwords"))
+
+    # Breach check is opt-in: it sends 5-char SHA-1 prefixes to HIBP (never the
+    # password or full hash). Interactive callers get asked; one-shot callers
+    # pass --hibp explicitly.
+    if hibp is None:
+        hibp = prompt_yn(
+            "\nCheck against HaveIBeenPwned? (sends only 5-char hash prefixes)"
+        )
+    if hibp:
+        breached: List[Tuple[str, int]] = []
+        checked: Dict[str, int] = {}
+        for name, e in sorted(vault.entries.items()):
+            if not e.password:
+                continue
+            try:
+                if e.password not in checked:
+                    checked[e.password] = hibp_breach_count(e.password)
+            except Exception as err:
+                print(C.red(f"\n  Breach check failed: {err}"))
+                break
+            if checked[e.password] > 0:
+                breached.append((name, checked[e.password]))
+        else:
+            if breached:
+                print(C.red("\n  ⚠ Found in known breaches:"))
+                for name, count in breached:
+                    print(f"    • {name} — seen {count:,} times")
+            else:
+                print(C.green("\n  ✓ No passwords found in known breaches"))
+
+    LOG.info("audit run (%d entries)", len(vault.entries))
+    print()
+
+
 def cmd_export(vault: Vault) -> None:
     out = prompt("Export file path", "vault_export.json")
     if not out:
@@ -1116,6 +1328,7 @@ MENU = f"""
   {C.cyan('4')}  edit        edit entry
   {C.cyan('5')}  delete      delete entry
   {C.cyan('6')}  generate    generate password / passphrase
+  {C.cyan('a')}  audit       password health report (reuse / weak / stale / breaches)
   {C.cyan('7')}  export      encrypted export
   {C.cyan('8')}  import      encrypted import
   {C.cyan('9')}  master      change master password
@@ -1143,6 +1356,7 @@ def interactive(vault: Vault) -> None:
             elif choice in ("4", "edit"):    cmd_edit(vault)
             elif choice in ("5", "delete"):  cmd_delete(vault)
             elif choice in ("6", "gen", "generate"): cmd_generate()
+            elif choice in ("a", "audit"):   cmd_audit(vault)
             elif choice in ("7", "export"):  cmd_export(vault)
             elif choice in ("8", "import"):  cmd_import(vault)
             elif choice in ("9", "master"):  cmd_change_master(vault)
@@ -1199,6 +1413,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--passphrase", action="store_true")
     g.add_argument("--words", type=int, default=5)
 
+    audit = sub.add_parser("audit", help="Password health report")
+    audit.add_argument(
+        "--hibp",
+        action="store_true",
+        help="Also check passwords against HaveIBeenPwned "
+        "(k-anonymity: only 5-char SHA-1 prefixes are sent)",
+    )
+
     sub.add_parser("export")
     sub.add_parser("import")
     sub.add_parser("master")
@@ -1251,6 +1473,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "edit":     cmd_edit(vault, getattr(args, "name", None))
         elif args.command == "delete":   cmd_delete(vault, getattr(args, "name", None))
         elif args.command == "search":   cmd_search(vault)
+        elif args.command == "audit":    cmd_audit(vault, getattr(args, "hibp", False))
         elif args.command == "export":   cmd_export(vault)
         elif args.command == "import":   cmd_import(vault)
         elif args.command == "master":   cmd_change_master(vault)

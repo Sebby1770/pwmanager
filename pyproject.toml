@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwmanager"
-version = "2.0.0"
+version = "2.1.0"
 description = "Advanced local, encrypted password manager — Argon2id + Fernet, TOTP, SQLite or JSON vault"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -9,6 +9,15 @@ stored.
 ![python](https://img.shields.io/badge/python-3.9%E2%80%933.13-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
+## What's new in 2.1
+
+- 🩺 **`pwmanager audit`** — password health report: reused, weak, and stale
+  passwords, plus an opt-in **HaveIBeenPwned breach check** (`--hibp`) using
+  the k-anonymity API (only 5-char SHA-1 prefixes are ever sent).
+- 🔁 **Persistent lockout** — failed-unlock cooldown now survives restarts
+  (recorded in an owner-only `<vault>.throttle` sidecar; exponential backoff,
+  cleared on a successful unlock).
+
 ## What's new in 2.0
 
 - 🔒 **Enforced integrity** — the file HMAC is now actually checked; a tampered
