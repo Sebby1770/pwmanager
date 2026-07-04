@@ -3,6 +3,21 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] — 2026-07-04
+
+### Added
+- **`pwmanager import-csv <file> --format {chrome,bitwarden,generic}`** — the
+  migration path in. Parses browser/password-manager CSV exports (BOM-safe,
+  case-insensitive headers): Chrome's `name,url,username,password`,
+  Bitwarden's `login_*` columns (including **`login_totp` → TOTP secret**),
+  or a generic layout. Unnamed rows are named after their URL's domain, rows
+  with no credentials are skipped, name clashes get a `" (2)"` suffix (never
+  overwriting existing entries), and imports are tagged (`--tag`, default
+  `imported`) for easy review. Reminds you the source CSV is plaintext.
+- Five new tests (30 total): Chrome + Bitwarden mappings, domain naming,
+  dedupe/skip rules, unknown-format rejection, and end-to-end merge +
+  persistence into a real vault.
+
 ## [2.1.0] — 2026-07-03
 
 ### Security

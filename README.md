@@ -9,6 +9,13 @@ stored.
 ![python](https://img.shields.io/badge/python-3.9%E2%80%933.13-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
+## What's new in 2.2
+
+- 📥 **CSV import** — migrate in from Chrome, Bitwarden, or any generic
+  export: `pwmanager import-csv passwords.csv --format chrome`. Maps
+  Bitwarden TOTP secrets, names unnamed rows after their domain, never
+  overwrites existing entries, and tags imports for review.
+
 ## What's new in 2.1
 
 - 🩺 **`pwmanager audit`** — password health report: reused, weak, and stale

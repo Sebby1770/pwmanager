@@ -257,6 +257,83 @@ def test_hibp_returns_zero_when_absent():
     assert pw.hibp_breach_count("uncrackable", fetch=lambda p: "AAAA:1\nBBBB:2\n") == 0
 
 
+# ----------------------------- CSV import -----------------------------
+
+def test_import_csv_chrome_format_and_domain_naming(tmp_path):
+    p = tmp_path / "chrome.csv"
+    p.write_text(
+        "name,url,username,password\n"
+        "GitHub,https://github.com,dev@example.com,pw-one\n"
+        ",https://www.example.com/login,user2,pw-two\n",
+        encoding="utf-8",
+    )
+    entries = pw.import_csv_entries(str(p), "chrome")
+    assert entries["GitHub"].username == "dev@example.com"
+    assert entries["GitHub"].password == "pw-one"
+    assert "example.com" in entries  # unnamed row named after its domain
+    assert entries["example.com"].password == "pw-two"
+
+
+def test_import_csv_bitwarden_maps_totp_and_notes(tmp_path):
+    p = tmp_path / "bw.csv"
+    p.write_text(
+        "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n"
+        ',,login,Bank,my note,,0,https://bank.io,me,s3cret,JBSWY3DPEHPK3PXP\n',
+        encoding="utf-8",
+    )
+    entries = pw.import_csv_entries(str(p), "bitwarden")
+    e = entries["Bank"]
+    assert e.password == "s3cret"
+    assert e.notes == "my note"
+    assert e.totp_secret == "JBSWY3DPEHPK3PXP"
+    assert e.url == "https://bank.io"
+
+
+def test_import_csv_deduplicates_names_and_skips_empty_rows(tmp_path):
+    p = tmp_path / "gen.csv"
+    p.write_text(
+        "name,username,password,url,notes\n"
+        "Acme,u1,p1,,\n"
+        "Acme,u2,p2,,\n"
+        "Empty,,,,\n",  # no username or password -> skipped
+        encoding="utf-8",
+    )
+    entries = pw.import_csv_entries(str(p), "generic")
+    assert set(entries) == {"Acme", "Acme (2)"}
+    assert entries["Acme (2)"].username == "u2"
+
+
+def test_import_csv_rejects_unknown_format(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text("name\nx\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        pw.import_csv_entries(str(p), "lastpass-turbo")
+
+
+def test_cmd_import_csv_merges_tags_and_persists(tmp_path, capsys):
+    vault_path = str(tmp_path / "v.json")
+    v = pw.Vault(vault_path)
+    v.create("a-strong-master-pw-1")
+    v.add("Acme", pw.Entry(username="existing", password="keep-me"))
+
+    p = tmp_path / "import.csv"
+    p.write_text(
+        "name,username,password,url,notes\nAcme,new,p-new,,\nOther,u,p,,\n",
+        encoding="utf-8",
+    )
+    pw.cmd_import_csv(v, str(p), "generic", tag="imported")
+
+    # Existing entry untouched; clashing import got a suffixed name.
+    assert v.entries["Acme"].password == "keep-me"
+    assert v.entries["Acme (2)"].password == "p-new"
+    assert v.entries["Other"].tags == ["imported"]
+
+    # Persisted: a fresh unlock sees all of it.
+    v2 = pw.Vault(vault_path)
+    v2.unlock("a-strong-master-pw-1")
+    assert {"Acme", "Acme (2)", "Other"} <= set(v2.entries)
+
+
 def test_search_finds_by_tag_and_name(tmp_path):
     path = str(tmp_path / "vault.json")
     v = pw.Vault(path, backend="json")

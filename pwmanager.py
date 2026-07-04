@@ -18,6 +18,7 @@ Features
 - Vault audit: reused / weak / stale passwords, plus an opt-in HaveIBeenPwned
   breach check via the k-anonymity API (only 5-char hash prefixes leave)
 - Encrypted export / import for backups
+- CSV import from Chrome / Bitwarden / generic exports (import-csv --format)
 - Enforced HMAC integrity check (unlock is refused if the file was tampered with)
 - Pluggable storage: a JSON file or an embedded SQLite database (--backend sqlite)
 - Optional audit log of events (never secrets) via --log-file
@@ -43,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import ctypes
 import getpass
 import hashlib
@@ -834,6 +836,113 @@ class Vault:
 
 
 # =============================================================================
+# CSV import (browser / password-manager exports)
+# =============================================================================
+
+# Column mappings per export format. An empty column name means "not present
+# in this format". Headers are matched case-insensitively.
+CSV_COLUMN_MAPS: Dict[str, Dict[str, str]] = {
+    "chrome": {
+        "name": "name", "username": "username", "password": "password",
+        "url": "url", "notes": "note", "totp": "",
+    },
+    "bitwarden": {
+        "name": "name", "username": "login_username", "password": "login_password",
+        "url": "login_uri", "notes": "notes", "totp": "login_totp",
+    },
+    "generic": {
+        "name": "name", "username": "username", "password": "password",
+        "url": "url", "notes": "notes", "totp": "totp",
+    },
+}
+
+
+def _domain_of(url: str) -> str:
+    """Best-effort hostname for naming an entry when the export has no name."""
+    if not url:
+        return ""
+    from urllib.parse import urlparse
+
+    netloc = urlparse(url if "//" in url else "//" + url).netloc
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+def import_csv_entries(path: str, fmt: str = "generic") -> Dict[str, Entry]:
+    """Parse a password-manager CSV export into Entry objects.
+
+    Pure (no vault mutation) so it is testable offline. Supported formats:
+    chrome, bitwarden, generic. Rows with neither a username nor a password
+    are skipped; unnamed rows are named after their URL's domain; duplicate
+    names get a " (2)"-style suffix.
+    """
+    cols = CSV_COLUMN_MAPS.get(fmt)
+    if cols is None:
+        raise ValueError(f"Unknown CSV format: {fmt} (use {', '.join(sorted(CSV_COLUMN_MAPS))})")
+
+    entries: Dict[str, Entry] = {}
+    # utf-8-sig: browsers commonly prepend a BOM to CSV exports.
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError("CSV file has no header row")
+        for i, raw_row in enumerate(reader, start=1):
+            row = {
+                (k or "").strip().lower(): (v or "").strip()
+                for k, v in raw_row.items()
+            }
+
+            def get(key: str) -> str:
+                col = cols[key]
+                return row.get(col, "") if col else ""
+
+            username, password = get("username"), get("password")
+            if not username and not password:
+                continue
+            name = get("name") or _domain_of(get("url")) or f"import-{i}"
+            base, n = name, 2
+            while name in entries:
+                name = f"{base} ({n})"
+                n += 1
+            entries[name] = Entry(
+                username=username,
+                password=password,
+                url=get("url"),
+                notes=get("notes"),
+                totp_secret=get("totp"),
+            )
+    return entries
+
+
+def cmd_import_csv(vault: Vault, path: str, fmt: str, tag: str) -> None:
+    if not os.path.exists(path):
+        print(C.red("File not found.\n"))
+        return
+    try:
+        imported = import_csv_entries(path, fmt)
+    except (ValueError, csv.Error, OSError) as e:
+        print(C.red(f"Import failed: {e}\n"))
+        return
+    if not imported:
+        print(C.yellow("No importable rows found.\n"))
+        return
+
+    added = 0
+    for name, entry in imported.items():
+        final, n = name, 2
+        while final in vault.entries:
+            final = f"{name} ({n})"
+            n += 1
+        if tag:
+            entry.tags = [tag]
+        vault.entries[final] = entry
+        added += 1
+    vault.save()
+    LOG.info("csv import: %d entries from %s (%s format)", added, os.path.basename(path), fmt)
+    print(C.green(f"Imported {added} entries from {path} ({fmt} format).\n"))
+    print(C.yellow("The CSV still holds your passwords in plaintext — delete it securely."))
+
+
+# =============================================================================
 # Clipboard with auto-clear
 # =============================================================================
 
@@ -1421,6 +1530,23 @@ def build_parser() -> argparse.ArgumentParser:
         "(k-anonymity: only 5-char SHA-1 prefixes are sent)",
     )
 
+    icsv = sub.add_parser(
+        "import-csv", help="Import a browser/password-manager CSV export"
+    )
+    icsv.add_argument("path", help="Path to the CSV file")
+    icsv.add_argument(
+        "--format",
+        dest="csv_format",
+        choices=sorted(CSV_COLUMN_MAPS),
+        default="generic",
+        help="Export format (default: generic name/username/password/url/notes)",
+    )
+    icsv.add_argument(
+        "--tag",
+        default="imported",
+        help="Tag applied to imported entries (use '' for none)",
+    )
+
     sub.add_parser("export")
     sub.add_parser("import")
     sub.add_parser("master")
@@ -1474,6 +1600,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "delete":   cmd_delete(vault, getattr(args, "name", None))
         elif args.command == "search":   cmd_search(vault)
         elif args.command == "audit":    cmd_audit(vault, getattr(args, "hibp", False))
+        elif args.command == "import-csv":
+            cmd_import_csv(vault, args.path, args.csv_format, args.tag)
         elif args.command == "export":   cmd_export(vault)
         elif args.command == "import":   cmd_import(vault)
         elif args.command == "master":   cmd_change_master(vault)
