@@ -1,0 +1,27 @@
+# Never commit real vaults, backups, or audit logs
+vault.json
+vault.db
+vault*.json
+vault*.db
+*.vault
+*_export.json
+*.log
+audit.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

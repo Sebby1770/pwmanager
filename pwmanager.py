@@ -14,9 +14,15 @@ Features
 - TOTP (RFC 6238) secret storage and live code generation
 - Clipboard copy with auto-clear after N seconds
 - Auto-lock after inactivity timeout
-- Failed-unlock lockout with exponential backoff
+- Failed-unlock lockout with exponential backoff — persisted across restarts
+- Vault audit: reused / weak / stale passwords, plus an opt-in HaveIBeenPwned
+  breach check via the k-anonymity API (only 5-char hash prefixes leave)
 - Encrypted export / import for backups
-- Vault file integrity check
+- CSV import from Chrome / Bitwarden / generic exports (import-csv --format)
+- Enforced HMAC integrity check (unlock is refused if the file was tampered with)
+- Pluggable storage: a JSON file or an embedded SQLite database (--backend sqlite)
+- Optional audit log of events (never secrets) via --log-file
+- Vault files written with owner-only (0600) permissions
 - Interactive menu OR one-shot CLI subcommands
 - Best-effort secure wipe of sensitive strings in memory
 
@@ -25,22 +31,30 @@ Usage
     python pwmanager.py                    # interactive menu
     python pwmanager.py add github         # one-shot add
     python pwmanager.py gen --length 24    # generate a password
+    python pwmanager.py audit --hibp       # password health + breach check
+    python pwmanager.py --backend sqlite   # use the embedded SQLite backend
+    python pwmanager.py --log-file audit.log view   # with an audit trail
     python pwmanager.py --help             # full help
 
-Vault file lives next to this script as `vault.json` unless --vault is given.
+Vault file lives next to this script as `vault.json` (or `vault.db` for the
+SQLite backend) unless --vault is given.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import ctypes
 import getpass
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
+import sqlite3
+import stat
 import string
 import sys
 import threading
@@ -89,6 +103,105 @@ KEY_SIZE = 32
 AUTOLOCK_SECONDS = 300       # 5 minutes idle
 CLIPBOARD_CLEAR_SECONDS = 20
 MAX_UNLOCK_ATTEMPTS = 5
+
+# ----- Audit logging -----
+# The audit log records *events* (unlock, add, delete, tamper) with entry
+# names and timestamps. It NEVER records passwords, secrets, or vault contents.
+LOG = logging.getLogger("pwmanager")
+
+
+def setup_logging(log_file: Optional[str] = None, verbose: bool = False) -> None:
+    """Configure the audit logger. Off by default; opt in with --log-file."""
+    LOG.setLevel(logging.DEBUG if verbose else logging.INFO)
+    handlers: List[logging.Handler] = []
+    if log_file:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        handlers.append(fh)
+        # Keep the audit log owner-only.
+        try:
+            os.chmod(log_file, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+    if verbose:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        handlers.append(sh)
+    if not handlers:
+        handlers.append(logging.NullHandler())
+    LOG.handlers = handlers
+
+
+class IntegrityError(Exception):
+    """Raised when a vault's authentication tag does not match its contents."""
+
+
+# =============================================================================
+# Persistent unlock throttle
+# =============================================================================
+
+LOCKOUT_BASE_SECONDS = 30
+LOCKOUT_MAX_SECONDS = 3600
+
+
+class Throttle:
+    """Persist failed-unlock state in a sidecar file next to the vault.
+
+    Pre-2.1 the failed-attempt counter lived in process memory, so an attacker
+    could dodge the lockout by simply restarting the program. This records
+    failures on disk (owner-only) and enforces an exponential cooldown that
+    survives restarts: 30s after the 5th failure, doubling per failure, capped
+    at an hour. A successful unlock clears it.
+    """
+
+    def __init__(self, vault_path: str):
+        self.path = vault_path + ".throttle"
+
+    def _read(self) -> dict:
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"fails": 0, "last_fail": 0.0}
+            return data
+        except (OSError, ValueError):
+            return {"fails": 0, "last_fail": 0.0}
+
+    def seconds_remaining(self) -> int:
+        """Seconds of cooldown left, or 0 if unlocking is currently allowed."""
+        state = self._read()
+        fails = int(state.get("fails", 0))
+        if fails < MAX_UNLOCK_ATTEMPTS:
+            return 0
+        wait = min(
+            LOCKOUT_BASE_SECONDS * (2 ** (fails - MAX_UNLOCK_ATTEMPTS)),
+            LOCKOUT_MAX_SECONDS,
+        )
+        remaining = float(state.get("last_fail", 0.0)) + wait - time.time()
+        if remaining <= 0:
+            return 0
+        return int(remaining) + 1  # ceil, so we never report 0 while locked
+
+    def record_failure(self) -> int:
+        """Record one failed unlock; returns the cumulative failure count."""
+        state = self._read()
+        state["fails"] = int(state.get("fails", 0)) + 1
+        state["last_fail"] = time.time()
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, self.path)
+        try:
+            os.chmod(self.path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+        return int(state["fails"])
+
+    def reset(self) -> None:
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
 
 # ANSI colors (auto-disabled if not a TTY)
 class C:
@@ -293,6 +406,70 @@ def strength_label(bits: float) -> str:
 
 
 # =============================================================================
+# Vault audit (password health)
+# =============================================================================
+
+WEAK_BITS_THRESHOLD = 50
+STALE_AFTER_DAYS = 365
+
+
+def analyze_entries(entries: Dict[str, "Entry"]) -> Dict[str, Any]:
+    """Pure audit pass over the decrypted entries (no network, no mutation).
+
+    Returns {"reused": [[names sharing a password], ...],
+             "weak":   [names with < WEAK_BITS_THRESHOLD bits of entropy],
+             "stale":  [names not updated in STALE_AFTER_DAYS days]}.
+    """
+    by_password: Dict[str, List[str]] = {}
+    weak: List[str] = []
+    stale: List[str] = []
+    now = time.time()
+    for name, e in entries.items():
+        if e.password:
+            by_password.setdefault(e.password, []).append(name)
+            if password_entropy_bits(e.password) < WEAK_BITS_THRESHOLD:
+                weak.append(name)
+        if now - e.updated_at > STALE_AFTER_DAYS * 86400:
+            stale.append(name)
+    reused = sorted(sorted(names) for names in by_password.values() if len(names) > 1)
+    return {"reused": reused, "weak": sorted(weak), "stale": sorted(stale)}
+
+
+def _hibp_fetch(prefix: str) -> str:
+    """Fetch one k-anonymity range from HaveIBeenPwned (network)."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"https://api.pwnedpasswords.com/range/{prefix}",
+        headers={"User-Agent": "pwmanager-audit"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def hibp_breach_count(
+    password: str, fetch: Optional[Callable[[str], str]] = None
+) -> int:
+    """How many breaches this password appears in, via HIBP's k-anonymity API.
+
+    Privacy property: only the first 5 hex chars of the password's SHA-1 ever
+    leave the machine; the full hash is matched locally against the returned
+    suffix list. Returns 0 when not found. `fetch` is injectable for tests.
+    """
+    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    prefix, suffix = digest[:5], digest[5:]
+    body = (fetch or _hibp_fetch)(prefix)
+    for line in body.splitlines():
+        candidate, _, count = line.strip().partition(":")
+        if candidate.upper() == suffix:
+            try:
+                return int(count.strip() or 0)
+            except ValueError:
+                return 1
+    return 0
+
+
+# =============================================================================
 # TOTP (RFC 6238)
 # =============================================================================
 
@@ -352,21 +529,174 @@ class Entry:
 
 
 # =============================================================================
-# Storage
+# Storage backends
+# =============================================================================
+#
+# Both backends persist the *same* encrypted payload (a dict of
+# version/kdf/salt/vault/hmac). The cryptography is identical — only the
+# container differs: a JSON file, or a single row in an embedded SQLite
+# database. This is what the `--backend sqlite` flag switches between.
+
+class StorageBackend:
+    """Abstract store for the encrypted vault payload."""
+
+    path: str
+
+    def exists(self) -> bool:
+        raise NotImplementedError
+
+    def read_payload(self) -> dict:
+        raise NotImplementedError
+
+    def write_payload(self, payload: dict) -> None:
+        raise NotImplementedError
+
+    def remove(self) -> None:
+        raise NotImplementedError
+
+    def warn_if_insecure(self) -> None:
+        """Log a warning if the store is readable by other users."""
+        try:
+            mode = os.stat(self.path).st_mode
+        except OSError:
+            return
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            LOG.warning("vault file %s is accessible by other users", self.path)
+
+
+class JSONStorage(StorageBackend):
+    """Default backend: an indented JSON file, written atomically, mode 0600."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def exists(self) -> bool:
+        return os.path.exists(self.path)
+
+    def read_payload(self) -> dict:
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(self.path)
+        with open(self.path, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Vault file is not valid JSON: {e}")
+
+    def write_payload(self, payload: dict) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
+        os.replace(tmp, self.path)
+
+    def remove(self) -> None:
+        if os.path.exists(self.path):
+            os.remove(self.path)
+
+
+class SQLiteStorage(StorageBackend):
+    """Embedded-database backend: the encrypted blob lives in a one-row SQLite
+    table. Same ciphertext as the JSON backend, different container — handy for
+    atomic writes and as a stepping stone to a server-backed store."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS vault ("
+            "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+            "  version INTEGER, kdf TEXT, salt TEXT, vault TEXT, hmac TEXT)"
+        )
+        return conn
+
+    def exists(self) -> bool:
+        if not os.path.exists(self.path):
+            return False
+        try:
+            conn = self._connect()
+        except sqlite3.DatabaseError:
+            return False
+        try:
+            row = conn.execute("SELECT 1 FROM vault WHERE id = 1").fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def read_payload(self) -> dict:
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(self.path)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT version, kdf, salt, vault, hmac FROM vault WHERE id = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise FileNotFoundError(self.path)
+        payload = {"version": row[0], "kdf": row[1], "salt": row[2], "vault": row[3]}
+        if row[4] is not None:
+            payload["hmac"] = row[4]
+        return payload
+
+    def write_payload(self, payload: dict) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO vault (id, version, kdf, salt, vault, hmac) "
+                "VALUES (1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "  version=excluded.version, kdf=excluded.kdf, salt=excluded.salt,"
+                "  vault=excluded.vault, hmac=excluded.hmac",
+                (
+                    payload.get("version", VAULT_VERSION),
+                    payload["kdf"],
+                    payload["salt"],
+                    payload["vault"],
+                    payload.get("hmac"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            os.chmod(self.path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+
+    def remove(self) -> None:
+        if os.path.exists(self.path):
+            os.remove(self.path)
+
+
+def make_storage(path: str, backend: str = "json") -> StorageBackend:
+    if backend == "sqlite":
+        return SQLiteStorage(path)
+    if backend == "json":
+        return JSONStorage(path)
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+# =============================================================================
+# Vault
 # =============================================================================
 
 class Vault:
-    def __init__(self, path: str = DEFAULT_VAULT_PATH):
+    def __init__(self, path: str = DEFAULT_VAULT_PATH, backend: str = "json"):
         self.path = path
+        self.backend = backend
+        self.storage = make_storage(path, backend)
         self.key: Optional[bytes] = None
         self.entries: Dict[str, Entry] = {}
         self.kdf_used: str = ""
         self.last_activity: float = time.time()
 
-    # ---- file IO ----
+    # ---- persistence ----
 
     def exists(self) -> bool:
-        return os.path.exists(self.path)
+        return self.storage.exists()
 
     def create(self, master_password: str, kdf: str = "auto") -> None:
         salt = generate_salt()
@@ -379,20 +709,16 @@ class Vault:
             "vault": ciphertext.decode("ascii"),
         }
         payload["hmac"] = file_hmac(payload, key)
-        self._write(payload)
+        self.storage.write_payload(payload)
         self.key = key
         self.kdf_used = kdf_used
         self.entries = {}
         self.last_activity = time.time()
+        LOG.info("vault created (backend=%s, kdf=%s)", self.backend, kdf_used)
 
     def unlock(self, master_password: str) -> None:
-        if not self.exists():
-            raise FileNotFoundError(self.path)
-        with open(self.path, "r", encoding="utf-8") as f:
-            try:
-                payload = json.load(f)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Vault file is not valid JSON: {e}")
+        payload = self.storage.read_payload()  # FileNotFoundError if absent
+        self.storage.warn_if_insecure()
 
         try:
             salt = base64.b64decode(payload["salt"])
@@ -403,31 +729,36 @@ class Vault:
 
         key, _ = derive_key(master_password, salt, kdf)
 
-        # Integrity check (only if hmac field is present — keeps backwards compat)
+        # Fernet raises InvalidToken on a wrong password. A successful decrypt
+        # proves the key is correct — so if an HMAC is present and *still*
+        # mismatches, the surrounding envelope (salt/version) was tampered with.
+        plaintext = decrypt_bytes(token, key)
+
         if "hmac" in payload:
             expected = file_hmac(payload, key)
-            if not hmac.compare_digest(expected, payload["hmac"]):
-                # Could be wrong password OR tampering — Fernet will tell us which
-                pass
+            if not hmac.compare_digest(expected, str(payload["hmac"])):
+                LOG.error("integrity check FAILED for %s", self.path)
+                raise IntegrityError(
+                    "vault integrity check failed — the file may be corrupt or tampered with"
+                )
 
-        plaintext = decrypt_bytes(token, key)  # raises InvalidToken on bad password
         raw = json.loads(plaintext.decode("utf-8"))
         self.entries = {name: Entry.from_dict(d) for name, d in raw.items()}
         self.key = key
         self.kdf_used = kdf
         self.last_activity = time.time()
+        LOG.info("vault unlocked (%d entries)", len(self.entries))
 
     def save(self) -> None:
         if self.key is None:
             raise RuntimeError("Vault is locked")
-        with open(self.path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
+        payload = self.storage.read_payload()
         raw = {name: e.to_dict() for name, e in self.entries.items()}
         ciphertext = encrypt_bytes(json.dumps(raw).encode("utf-8"), self.key)
         payload["vault"] = ciphertext.decode("ascii")
         payload["version"] = VAULT_VERSION
         payload["hmac"] = file_hmac(payload, self.key)
-        self._write(payload)
+        self.storage.write_payload(payload)
         self.last_activity = time.time()
 
     def lock(self) -> None:
@@ -435,12 +766,6 @@ class Vault:
         if isinstance(self.key, (bytes, bytearray)):
             secure_wipe(self.key)
         self.key = None
-
-    def _write(self, payload: dict) -> None:
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, self.path)
 
     # ---- entry ops ----
 
@@ -453,10 +778,12 @@ class Vault:
     def add(self, name: str, entry: Entry) -> None:
         self.entries[name] = entry
         self.save()
+        LOG.info("entry added/updated: %s", name)
 
     def delete(self, name: str) -> None:
         del self.entries[name]
         self.save()
+        LOG.info("entry deleted: %s", name)
 
     def search(self, query: str) -> List[str]:
         q = query.lower()
@@ -485,6 +812,11 @@ class Vault:
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        try:
+            os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+        LOG.info("exported %d entries to %s", len(self.entries), out_path)
 
     def import_encrypted(self, in_path: str, password: str, merge: bool = True) -> int:
         with open(in_path, "r", encoding="utf-8") as f:
@@ -501,6 +833,113 @@ class Vault:
             added += 1
         self.save()
         return added
+
+
+# =============================================================================
+# CSV import (browser / password-manager exports)
+# =============================================================================
+
+# Column mappings per export format. An empty column name means "not present
+# in this format". Headers are matched case-insensitively.
+CSV_COLUMN_MAPS: Dict[str, Dict[str, str]] = {
+    "chrome": {
+        "name": "name", "username": "username", "password": "password",
+        "url": "url", "notes": "note", "totp": "",
+    },
+    "bitwarden": {
+        "name": "name", "username": "login_username", "password": "login_password",
+        "url": "login_uri", "notes": "notes", "totp": "login_totp",
+    },
+    "generic": {
+        "name": "name", "username": "username", "password": "password",
+        "url": "url", "notes": "notes", "totp": "totp",
+    },
+}
+
+
+def _domain_of(url: str) -> str:
+    """Best-effort hostname for naming an entry when the export has no name."""
+    if not url:
+        return ""
+    from urllib.parse import urlparse
+
+    netloc = urlparse(url if "//" in url else "//" + url).netloc
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+def import_csv_entries(path: str, fmt: str = "generic") -> Dict[str, Entry]:
+    """Parse a password-manager CSV export into Entry objects.
+
+    Pure (no vault mutation) so it is testable offline. Supported formats:
+    chrome, bitwarden, generic. Rows with neither a username nor a password
+    are skipped; unnamed rows are named after their URL's domain; duplicate
+    names get a " (2)"-style suffix.
+    """
+    cols = CSV_COLUMN_MAPS.get(fmt)
+    if cols is None:
+        raise ValueError(f"Unknown CSV format: {fmt} (use {', '.join(sorted(CSV_COLUMN_MAPS))})")
+
+    entries: Dict[str, Entry] = {}
+    # utf-8-sig: browsers commonly prepend a BOM to CSV exports.
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError("CSV file has no header row")
+        for i, raw_row in enumerate(reader, start=1):
+            row = {
+                (k or "").strip().lower(): (v or "").strip()
+                for k, v in raw_row.items()
+            }
+
+            def get(key: str) -> str:
+                col = cols[key]
+                return row.get(col, "") if col else ""
+
+            username, password = get("username"), get("password")
+            if not username and not password:
+                continue
+            name = get("name") or _domain_of(get("url")) or f"import-{i}"
+            base, n = name, 2
+            while name in entries:
+                name = f"{base} ({n})"
+                n += 1
+            entries[name] = Entry(
+                username=username,
+                password=password,
+                url=get("url"),
+                notes=get("notes"),
+                totp_secret=get("totp"),
+            )
+    return entries
+
+
+def cmd_import_csv(vault: Vault, path: str, fmt: str, tag: str) -> None:
+    if not os.path.exists(path):
+        print(C.red("File not found.\n"))
+        return
+    try:
+        imported = import_csv_entries(path, fmt)
+    except (ValueError, csv.Error, OSError) as e:
+        print(C.red(f"Import failed: {e}\n"))
+        return
+    if not imported:
+        print(C.yellow("No importable rows found.\n"))
+        return
+
+    added = 0
+    for name, entry in imported.items():
+        final, n = name, 2
+        while final in vault.entries:
+            final = f"{name} ({n})"
+            n += 1
+        if tag:
+            entry.tags = [tag]
+        vault.entries[final] = entry
+        added += 1
+    vault.save()
+    LOG.info("csv import: %d entries from %s (%s format)", added, os.path.basename(path), fmt)
+    print(C.green(f"Imported {added} entries from {path} ({fmt} format).\n"))
+    print(C.yellow("The CSV still holds your passwords in plaintext — delete it securely."))
 
 
 # =============================================================================
@@ -636,6 +1075,15 @@ def unlock_or_create(vault: Vault) -> bool:
         print(C.green("Vault created.\n"))
         return True
 
+    # Persistent lockout: failures are recorded on disk, so restarting the
+    # program does not reset the cooldown.
+    throttle = Throttle(vault.path)
+    wait = throttle.seconds_remaining()
+    if wait > 0:
+        LOG.error("unlock refused: lockout active (%ds remaining)", wait)
+        print(C.red(f"Locked out after too many failed attempts. Try again in {wait}s."))
+        return False
+
     backoff = 1.0
     for attempt in range(1, MAX_UNLOCK_ATTEMPTS + 1):
         pw = prompt_secret("Master password")
@@ -643,11 +1091,18 @@ def unlock_or_create(vault: Vault) -> bool:
             return False
         try:
             vault.unlock(pw)
+            throttle.reset()
             print(C.green(f"Vault unlocked. {len(vault.entries)} entries.") +
                   C.dim(f" (KDF: {vault.kdf_used})\n"))
             return True
+        except IntegrityError as e:
+            print(C.red(f"Refusing to unlock: {e}\n"))
+            return False
         except InvalidToken:
+            fails = throttle.record_failure()
             remaining = MAX_UNLOCK_ATTEMPTS - attempt
+            LOG.warning("failed unlock attempt %d/%d (%d on record)",
+                        attempt, MAX_UNLOCK_ATTEMPTS, fails)
             print(C.red(f"Wrong password. {remaining} attempt(s) left."))
             if remaining > 0:
                 time.sleep(backoff)
@@ -655,7 +1110,9 @@ def unlock_or_create(vault: Vault) -> bool:
         except (ValueError, FileNotFoundError) as e:
             print(C.red(f"Error: {e}"))
             return False
-    print(C.red("Too many failed attempts. Locked out."))
+    wait = throttle.seconds_remaining()
+    LOG.error("locked out after %d failed attempts", MAX_UNLOCK_ATTEMPTS)
+    print(C.red(f"Too many failed attempts. Locked out for {wait}s (persists across restarts)."))
     return False
 
 
@@ -850,6 +1307,70 @@ def cmd_generate() -> None:
             print(C.green(f"Copied. Auto-clear in {CLIPBOARD_CLEAR_SECONDS}s.\n"))
 
 
+def cmd_audit(vault: Vault, hibp: Optional[bool] = None) -> None:
+    """Password health report: reuse, weak, stale — and optional breach check."""
+    if not vault.entries:
+        print(C.dim("Vault is empty.\n"))
+        return
+
+    findings = analyze_entries(vault.entries)
+    print(C.bold(f"\nAudit — {len(vault.entries)} entries"))
+
+    if findings["reused"]:
+        print(C.red(f"\n  Reused passwords ({len(findings['reused'])} group(s)):"))
+        for group in findings["reused"]:
+            print(f"    • {', '.join(group)}")
+    else:
+        print(C.green("\n  ✓ No reused passwords"))
+
+    if findings["weak"]:
+        print(C.yellow(f"\n  Weak passwords (< {WEAK_BITS_THRESHOLD} bits):"))
+        for name in findings["weak"]:
+            bits = password_entropy_bits(vault.entries[name].password)
+            print(f"    • {name} ({bits:.0f} bits)")
+    else:
+        print(C.green("  ✓ No weak passwords"))
+
+    if findings["stale"]:
+        print(C.yellow("\n  Not rotated in over a year:"))
+        for name in findings["stale"]:
+            print(f"    • {name}")
+    else:
+        print(C.green("  ✓ No stale passwords"))
+
+    # Breach check is opt-in: it sends 5-char SHA-1 prefixes to HIBP (never the
+    # password or full hash). Interactive callers get asked; one-shot callers
+    # pass --hibp explicitly.
+    if hibp is None:
+        hibp = prompt_yn(
+            "\nCheck against HaveIBeenPwned? (sends only 5-char hash prefixes)"
+        )
+    if hibp:
+        breached: List[Tuple[str, int]] = []
+        checked: Dict[str, int] = {}
+        for name, e in sorted(vault.entries.items()):
+            if not e.password:
+                continue
+            try:
+                if e.password not in checked:
+                    checked[e.password] = hibp_breach_count(e.password)
+            except Exception as err:
+                print(C.red(f"\n  Breach check failed: {err}"))
+                break
+            if checked[e.password] > 0:
+                breached.append((name, checked[e.password]))
+        else:
+            if breached:
+                print(C.red("\n  ⚠ Found in known breaches:"))
+                for name, count in breached:
+                    print(f"    • {name} — seen {count:,} times")
+            else:
+                print(C.green("\n  ✓ No passwords found in known breaches"))
+
+    LOG.info("audit run (%d entries)", len(vault.entries))
+    print()
+
+
 def cmd_export(vault: Vault) -> None:
     out = prompt("Export file path", "vault_export.json")
     if not out:
@@ -880,8 +1401,7 @@ def cmd_change_master(vault: Vault) -> None:
     current = prompt_secret("Current master password")
     try:
         # Verify by re-deriving
-        with open(vault.path) as f:
-            payload = json.load(f)
+        payload = vault.storage.read_payload()
         salt = base64.b64decode(payload["salt"])
         key, _ = derive_key(current, salt, payload.get("kdf", "pbkdf2"))
         decrypt_bytes(payload["vault"].encode("ascii"), key)
@@ -897,10 +1417,11 @@ def cmd_change_master(vault: Vault) -> None:
 
     # Re-create vault with new password but same entries
     entries_backup = vault.entries.copy()
-    os.remove(vault.path)
+    vault.storage.remove()
     vault.create(new1)
     vault.entries = entries_backup
     vault.save()
+    LOG.info("master password changed")
     print(C.green("Master password changed.\n"))
 
 
@@ -916,6 +1437,7 @@ MENU = f"""
   {C.cyan('4')}  edit        edit entry
   {C.cyan('5')}  delete      delete entry
   {C.cyan('6')}  generate    generate password / passphrase
+  {C.cyan('a')}  audit       password health report (reuse / weak / stale / breaches)
   {C.cyan('7')}  export      encrypted export
   {C.cyan('8')}  import      encrypted import
   {C.cyan('9')}  master      change master password
@@ -943,6 +1465,7 @@ def interactive(vault: Vault) -> None:
             elif choice in ("4", "edit"):    cmd_edit(vault)
             elif choice in ("5", "delete"):  cmd_delete(vault)
             elif choice in ("6", "gen", "generate"): cmd_generate()
+            elif choice in ("a", "audit"):   cmd_audit(vault)
             elif choice in ("7", "export"):  cmd_export(vault)
             elif choice in ("8", "import"):  cmd_import(vault)
             elif choice in ("9", "master"):  cmd_change_master(vault)
@@ -971,6 +1494,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="Advanced local password manager",
     )
     p.add_argument("--vault", default=DEFAULT_VAULT_PATH, help="Path to vault file")
+    p.add_argument(
+        "--backend",
+        choices=["json", "sqlite"],
+        default="json",
+        help="Storage backend: a JSON file (default) or an embedded SQLite DB",
+    )
+    p.add_argument(
+        "--log-file",
+        help="Write an audit log (events only, never secrets) to this file",
+    )
+    p.add_argument(
+        "--verbose", action="store_true", help="Also print audit events to stderr"
+    )
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("add").add_argument("name", nargs="?")
@@ -986,6 +1522,31 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--passphrase", action="store_true")
     g.add_argument("--words", type=int, default=5)
 
+    audit = sub.add_parser("audit", help="Password health report")
+    audit.add_argument(
+        "--hibp",
+        action="store_true",
+        help="Also check passwords against HaveIBeenPwned "
+        "(k-anonymity: only 5-char SHA-1 prefixes are sent)",
+    )
+
+    icsv = sub.add_parser(
+        "import-csv", help="Import a browser/password-manager CSV export"
+    )
+    icsv.add_argument("path", help="Path to the CSV file")
+    icsv.add_argument(
+        "--format",
+        dest="csv_format",
+        choices=sorted(CSV_COLUMN_MAPS),
+        default="generic",
+        help="Export format (default: generic name/username/password/url/notes)",
+    )
+    icsv.add_argument(
+        "--tag",
+        default="imported",
+        help="Tag applied to imported entries (use '' for none)",
+    )
+
     sub.add_parser("export")
     sub.add_parser("import")
     sub.add_parser("master")
@@ -995,6 +1556,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    setup_logging(getattr(args, "log_file", None), getattr(args, "verbose", False))
 
     # `gen` is the only command that doesn't need the vault
     if args.command == "gen":
@@ -1020,7 +1583,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(C.dim("(install argon2-cffi for stronger key derivation)"))
     print()
 
-    vault = Vault(args.vault)
+    vault_path = args.vault
+    if args.backend == "sqlite" and vault_path == DEFAULT_VAULT_PATH:
+        vault_path = os.path.join(os.path.dirname(DEFAULT_VAULT_PATH), "vault.db")
+
+    vault = Vault(vault_path, backend=args.backend)
     if not unlock_or_create(vault):
         return 1
 
@@ -1032,6 +1599,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "edit":     cmd_edit(vault, getattr(args, "name", None))
         elif args.command == "delete":   cmd_delete(vault, getattr(args, "name", None))
         elif args.command == "search":   cmd_search(vault)
+        elif args.command == "audit":    cmd_audit(vault, getattr(args, "hibp", False))
+        elif args.command == "import-csv":
+            cmd_import_csv(vault, args.path, args.csv_format, args.tag)
         elif args.command == "export":   cmd_export(vault)
         elif args.command == "import":   cmd_import(vault)
         elif args.command == "master":   cmd_change_master(vault)
