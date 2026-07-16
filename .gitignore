@@ -1,0 +1,40 @@
+# Secrets — never commit real vaults
+vault.json
+vault_export.json
+*.vault.json
+*.tmp
+
+# Vault backups
+vault.json.bak
+vault.json.backup
+*vault*backup*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Testing / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Junk / duplicate docs
+README copy*
+README_*.md
