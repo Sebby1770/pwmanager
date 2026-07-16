@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hmac
 import json
 import os
 import time
-from typing import Dict, List, Optional
+from difflib import SequenceMatcher
+from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 
@@ -24,12 +26,15 @@ from pwmanager.models import Entry
 
 
 class Vault:
-    def __init__(self, path: str = DEFAULT_VAULT_PATH):
+    def __init__(self, path: str = DEFAULT_VAULT_PATH, lock_timeout: Optional[int] = None):
         self.path = path
         self.key: Optional[bytes] = None
         self.entries: Dict[str, Entry] = {}
         self.kdf_used: str = ""
         self.last_activity: float = time.time()
+        self.lock_timeout: int = (
+            int(lock_timeout) if lock_timeout is not None else AUTOLOCK_SECONDS
+        )
 
     # ---- file IO ----
 
@@ -116,7 +121,7 @@ class Vault:
         self.last_activity = time.time()
 
     def is_idle(self) -> bool:
-        return (time.time() - self.last_activity) > AUTOLOCK_SECONDS
+        return (time.time() - self.last_activity) > self.lock_timeout
 
     def add(self, name: str, entry: Entry) -> None:
         self.entries[name] = entry
@@ -125,6 +130,29 @@ class Vault:
     def delete(self, name: str) -> None:
         del self.entries[name]
         self.save()
+
+    def pin(self, name: str) -> None:
+        if name not in self.entries:
+            raise KeyError(name)
+        self.entries[name].favorite = True
+        self.entries[name].updated_at = time.time()
+        self.save()
+
+    def unpin(self, name: str) -> None:
+        if name not in self.entries:
+            raise KeyError(name)
+        self.entries[name].favorite = False
+        self.entries[name].updated_at = time.time()
+        self.save()
+
+    def favorites(self) -> List[str]:
+        return sorted(n for n, e in self.entries.items() if e.favorite)
+
+    def sorted_entry_names(self) -> List[str]:
+        """Favorites first (alpha), then the rest (alpha)."""
+        favs = sorted(n for n, e in self.entries.items() if e.favorite)
+        rest = sorted(n for n, e in self.entries.items() if not e.favorite)
+        return favs + rest
 
     def search(self, query: str, tag: Optional[str] = None) -> List[str]:
         q = query.lower() if query else ""
@@ -142,7 +170,55 @@ class Vault:
                 if q not in haystack:
                     continue
             results.append(name)
-        return sorted(results)
+        # Favorites first among exact matches
+        return sorted(results, key=lambda n: (not self.entries[n].favorite, n.lower()))
+
+    def fuzzy_search(
+        self,
+        query: str,
+        tag: Optional[str] = None,
+        limit: int = 10,
+        cutoff: float = 0.4,
+        exclude: Optional[List[str]] = None,
+    ) -> List[Tuple[str, float]]:
+        """Rank entries by fuzzy similarity when exact search misses (or to supplement).
+
+        Returns list of (name, score) sorted by score descending, favorites boosted.
+        """
+        q = (query or "").lower().strip()
+        if not q:
+            return []
+        tag_q = tag.lower() if tag else None
+        excluded = set(exclude or [])
+        scored: List[Tuple[str, float]] = []
+
+        for name, e in self.entries.items():
+            if name in excluded:
+                continue
+            if tag_q is not None:
+                entry_tags = [t.lower() for t in e.tags]
+                if tag_q not in entry_tags:
+                    continue
+            fields = [name, e.username, e.url, e.notes] + list(e.tags)
+            best = 0.0
+            for field in fields:
+                if not field:
+                    continue
+                fl = field.lower()
+                # SequenceMatcher ratio against full field and against query-length windows
+                best = max(best, SequenceMatcher(None, q, fl).ratio())
+                if q in fl:
+                    best = max(best, 0.95)
+                # Token-wise best
+                for token in fl.replace("/", " ").replace(".", " ").split():
+                    best = max(best, SequenceMatcher(None, q, token).ratio())
+            if e.favorite:
+                best = min(1.0, best + 0.05)
+            if best >= cutoff:
+                scored.append((name, round(best, 4)))
+
+        scored.sort(key=lambda t: (-t[1], t[0].lower()))
+        return scored[:limit]
 
     # ---- export / import ----
 
@@ -176,6 +252,88 @@ class Vault:
             added += 1
         self.save()
         return added
+
+    def export_csv(self, out_path: str) -> int:
+        """Export all entries as plaintext CSV. Returns number of rows written.
+
+        WARNING: output is unencrypted. Caller must obtain explicit confirmation.
+        """
+        fieldnames = [
+            "name",
+            "username",
+            "password",
+            "url",
+            "notes",
+            "tags",
+            "totp_secret",
+            "favorite",
+        ]
+        count = 0
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for name in self.sorted_entry_names():
+                e = self.entries[name]
+                writer.writerow(
+                    {
+                        "name": name,
+                        "username": e.username,
+                        "password": e.password,
+                        "url": e.url,
+                        "notes": e.notes,
+                        "tags": ",".join(e.tags),
+                        "totp_secret": e.totp_secret,
+                        "favorite": "true" if e.favorite else "false",
+                    }
+                )
+                count += 1
+        return count
+
+    def stats(self) -> Dict[str, Any]:
+        """Aggregate vault statistics for the `stats` command."""
+        from collections import Counter
+
+        from pwmanager.audit import audit_vault
+
+        total = len(self.entries)
+        tags_counter: Counter = Counter()
+        with_totp = 0
+        favorites = 0
+        oldest_updated: Optional[Tuple[str, float]] = None
+        newest_updated: Optional[Tuple[str, float]] = None
+
+        for name, e in self.entries.items():
+            for t in e.tags:
+                tags_counter[t] += 1
+            if e.totp_secret:
+                with_totp += 1
+            if e.favorite:
+                favorites += 1
+            ts = e.updated_at or e.created_at or 0.0
+            if oldest_updated is None or ts < oldest_updated[1]:
+                oldest_updated = (name, ts)
+            if newest_updated is None or ts > newest_updated[1]:
+                newest_updated = (name, ts)
+
+        report = audit_vault(self)
+        return {
+            "total_entries": total,
+            "favorites": favorites,
+            "with_totp": with_totp,
+            "without_totp": total - with_totp,
+            "tags": dict(sorted(tags_counter.items(), key=lambda x: (-x[1], x[0]))),
+            "oldest_updated": (
+                {"name": oldest_updated[0], "updated_at": oldest_updated[1]}
+                if oldest_updated
+                else None
+            ),
+            "newest_updated": (
+                {"name": newest_updated[0], "updated_at": newest_updated[1]}
+                if newest_updated
+                else None
+            ),
+            "health_score": report.health_score,
+        }
 
 
 # Re-export InvalidToken for callers that catch unlock failures

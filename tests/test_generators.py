@@ -10,6 +10,7 @@ from pwmanager.constants import SYMBOLS
 from pwmanager.generators import (
     generate_passphrase,
     generate_password,
+    get_wordlist,
     password_entropy_bits,
 )
 
@@ -65,3 +66,9 @@ def test_password_entropy_empty_and_strong():
     strong = password_entropy_bits("aB3!xY9$qW2@mN7#")
     assert weak < 50
     assert strong > 50
+
+
+def test_wordlist_is_large():
+    words = get_wordlist()
+    assert len(words) >= 1000
+    assert all(isinstance(w, str) and w for w in words)

@@ -97,3 +97,14 @@ def test_export_import_encrypted(tmp_path):
     n = v2.import_encrypted(str(export_path), "export-pass-not-real", merge=True)
     assert n == 1
     assert "a" in v2.entries
+
+
+def test_lock_timeout_custom(tmp_path):
+    path = tmp_path / "vault.json"
+    v = Vault(str(path), lock_timeout=1)
+    assert v.lock_timeout == 1
+    v.create(MASTER, kdf="pbkdf2")
+    v.last_activity = 0  # far in the past
+    assert v.is_idle() is True
+    v.touch()
+    assert v.is_idle() is False

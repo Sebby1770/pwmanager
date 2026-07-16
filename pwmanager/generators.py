@@ -5,13 +5,16 @@ from __future__ import annotations
 import math
 import secrets
 import string
+from functools import lru_cache
+from importlib import resources
+from pathlib import Path
+from typing import List
 
 from pwmanager.colors import C
 from pwmanager.constants import SYMBOLS
 
-# Small embedded EFF-style wordlist (300 words). For real diceware use the
-# full 7776-word EFF list — this is a compact subset for zero-dependency use.
-_WORDLIST = """\
+# Compact fallback if package data is missing (should rarely be used).
+_FALLBACK_WORDLIST = """\
 abandon ability able about above absent absorb abstract absurd abuse access accident
 account accuse achieve acid acoustic acquire across action actor actress actual adapt
 add addict address adjust admit adult advance advice aerobic affair afford afraid again
@@ -31,6 +34,42 @@ bonus book boost border boring borrow boss bottom bounce box boy bracket brain b
 brass brave bread breeze brick bridge brief bright bring brisk broccoli broken bronze
 broom brother brown brush bubble buddy budget buffalo build bulb bulk bullet bundle
 """.split()
+
+
+@lru_cache(maxsize=1)
+def _load_wordlist() -> List[str]:
+    """Load passphrase wordlist from package data (1000+ words)."""
+    # 1) importlib.resources (installed package)
+    try:
+        ref = resources.files("pwmanager").joinpath("data/eff_short.txt")
+        text = ref.read_text(encoding="utf-8")
+        words = [w.strip().lower() for w in text.splitlines() if w.strip() and not w.startswith("#")]
+        if len(words) >= 100:
+            return words
+    except (FileNotFoundError, OSError, TypeError, AttributeError, ModuleNotFoundError):
+        pass
+
+    # 2) adjacent file next to this module (editable / source tree)
+    try:
+        path = Path(__file__).resolve().parent / "data" / "eff_short.txt"
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            words = [
+                w.strip().lower()
+                for w in text.splitlines()
+                if w.strip() and not w.startswith("#")
+            ]
+            if len(words) >= 100:
+                return words
+    except OSError:
+        pass
+
+    return list(_FALLBACK_WORDLIST)
+
+
+def get_wordlist() -> List[str]:
+    """Return the active passphrase wordlist (copy not needed; treat as read-only)."""
+    return _load_wordlist()
 
 
 def generate_password(
@@ -79,7 +118,8 @@ def generate_password(
 def generate_passphrase(words: int = 5, separator: str = "-", capitalize: bool = False) -> str:
     if words < 3:
         raise ValueError("Use at least 3 words.")
-    chosen = [secrets.choice(_WORDLIST) for _ in range(words)]
+    wordlist = get_wordlist()
+    chosen = [secrets.choice(wordlist) for _ in range(words)]
     if capitalize:
         chosen = [w.capitalize() for w in chosen]
     return separator.join(chosen)

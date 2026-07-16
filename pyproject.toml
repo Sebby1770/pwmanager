@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwmanager"
-version = "2.0.0"
-description = "Local encrypted password manager with TOTP, audit, and CSV import"
+version = "2.1.0"
+description = "Local encrypted password manager with TOTP, audit, favorites, and CSV export"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
@@ -47,6 +47,9 @@ Security = "https://github.com/Sebby1770/pwmanager/blob/main/SECURITY.md"
 
 [tool.setuptools.packages.find]
 include = ["pwmanager*"]
+
+[tool.setuptools.package-data]
+pwmanager = ["data/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

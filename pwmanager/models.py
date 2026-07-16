@@ -18,6 +18,7 @@ class Entry:
     history: List[Dict[str, Any]] = field(default_factory=list)  # [{password, changed_at}]
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    favorite: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -34,4 +35,5 @@ class Entry:
             history=list(d.get("history", [])),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
+            favorite=bool(d.get("favorite", False)),
         )

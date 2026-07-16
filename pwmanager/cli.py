@@ -19,6 +19,7 @@ from pwmanager import __version__
 from pwmanager.audit import audit_vault, health_score_color, print_audit_report
 from pwmanager.colors import C
 from pwmanager.constants import (
+    AUTOLOCK_SECONDS,
     CLIPBOARD_CLEAR_SECONDS,
     DEFAULT_VAULT_PATH,
     MAX_UNLOCK_ATTEMPTS,
@@ -32,7 +33,7 @@ from pwmanager.generators import (
 )
 from pwmanager.importers import import_csv_file, merge_entries
 from pwmanager.models import Entry
-from pwmanager.totp import totp_now, totp_seconds_remaining
+from pwmanager.totp import totp_now, totp_seconds_remaining, totp_uri
 from pwmanager.vault import Vault
 
 try:
@@ -48,12 +49,19 @@ except ImportError:
 # =============================================================================
 
 _clipboard_timer: Optional[threading.Timer] = None
+_clipboard_timeout: int = CLIPBOARD_CLEAR_SECONDS
 
 
-def copy_with_autoclear(text: str, seconds: int = CLIPBOARD_CLEAR_SECONDS) -> bool:
+def set_clipboard_timeout(seconds: int) -> None:
+    global _clipboard_timeout
+    _clipboard_timeout = max(1, int(seconds))
+
+
+def copy_with_autoclear(text: str, seconds: Optional[int] = None) -> bool:
     global _clipboard_timer
     if not CLIPBOARD_AVAILABLE:
         return False
+    clear_after = _clipboard_timeout if seconds is None else seconds
     try:
         pyperclip.copy(text)
     except Exception:
@@ -70,7 +78,7 @@ def copy_with_autoclear(text: str, seconds: int = CLIPBOARD_CLEAR_SECONDS) -> bo
         except Exception:
             pass
 
-    _clipboard_timer = threading.Timer(seconds, clear)
+    _clipboard_timer = threading.Timer(clear_after, clear)
     _clipboard_timer.daemon = True
     _clipboard_timer.start()
     return True
@@ -122,7 +130,8 @@ def prompt_int(text: str, default: int) -> int:
 
 def print_entry(name: str, e: Entry, show_password: bool = True) -> None:
     print()
-    print(C.bold(C.cyan(f"  {name}")))
+    star = C.yellow("★ ") if e.favorite else ""
+    print(C.bold(C.cyan(f"  {star}{name}")))
     print(f"  {C.dim('Username:')} {e.username}")
     if show_password:
         bits = password_entropy_bits(e.password)
@@ -138,6 +147,8 @@ def print_entry(name: str, e: Entry, show_password: bool = True) -> None:
         print(f"  {C.dim('Tags:    ')} {', '.join(e.tags)}")
     if e.notes:
         print(f"  {C.dim('Notes:   ')} {e.notes}")
+    if e.favorite:
+        print(f"  {C.dim('Favorite:')} {C.yellow('yes')}")
     if e.totp_secret:
         try:
             code = totp_now(e.totp_secret)
@@ -146,6 +157,8 @@ def print_entry(name: str, e: Entry, show_password: bool = True) -> None:
                 f"  {C.dim('TOTP:    ')} {C.green(code)} "
                 f"{C.dim(f'({remaining}s left)')}"
             )
+            uri = totp_uri(e.totp_secret, name)
+            print(f"  {C.dim('otpauth: ')} {uri}")
         except ValueError as err:
             print(f"  {C.dim('TOTP:    ')} {C.red(str(err))}")
     if e.history:
@@ -257,6 +270,9 @@ def cmd_add(vault: Vault, name: Optional[str] = None) -> None:
     if prompt_yn("Add a TOTP secret (2FA)?"):
         e.totp_secret = prompt("Base32 secret")
 
+    if prompt_yn("Pin as favorite?"):
+        e.favorite = True
+
     vault.add(name, e)
     print(C.green(f"Saved '{name}'.\n"))
 
@@ -269,9 +285,16 @@ def cmd_view(vault: Vault, name: Optional[str] = None) -> None:
         name = prompt("Entry name (blank to list all)")
     if not name:
         print(C.bold("\nAll entries:"))
+        favs = vault.favorites()
+        if favs:
+            print(f"  {C.yellow('★ favorites')}")
+            for n in favs:
+                print(f"    • {C.yellow(n)}")
         by_tag: dict = {}
         untagged = []
         for n, e in vault.entries.items():
+            if e.favorite:
+                continue  # already listed under favorites
             if e.tags:
                 for t in e.tags:
                     by_tag.setdefault(t, []).append(n)
@@ -289,12 +312,19 @@ def cmd_view(vault: Vault, name: Optional[str] = None) -> None:
         return
     e = vault.entries.get(name)
     if not e:
-        print(C.red(f"No entry named '{name}'.\n"))
+        # Try fuzzy suggestion
+        fuzzy = vault.fuzzy_search(name, limit=5, cutoff=0.45)
+        print(C.red(f"No entry named '{name}'."))
+        if fuzzy:
+            print(C.dim("Did you mean:"))
+            for n, score in fuzzy:
+                print(f"  • {n} {C.dim(f'({score:.0%})')}")
+        print()
         return
     print_entry(name, e)
     if CLIPBOARD_AVAILABLE and prompt_yn("Copy password to clipboard?"):
         if copy_with_autoclear(e.password):
-            print(C.green(f"Copied. Will clear in {CLIPBOARD_CLEAR_SECONDS}s.\n"))
+            print(C.green(f"Copied. Will clear in {_clipboard_timeout}s.\n"))
         else:
             print(C.red("Clipboard copy failed.\n"))
 
@@ -303,6 +333,7 @@ def cmd_search(
     vault: Vault,
     query: Optional[str] = None,
     tag: Optional[str] = None,
+    fuzzy: bool = True,
 ) -> None:
     if not vault.entries:
         print(C.dim("Vault is empty.\n"))
@@ -317,16 +348,57 @@ def cmd_search(
     if not query and not tag:
         print(C.dim("Provide a search query and/or --tag.\n"))
         return
+
     matches = vault.search(query or "", tag=tag)
-    if not matches:
-        print(C.dim("No matches.\n"))
-        return
-    print(C.bold(f"\n{len(matches)} match(es):"))
-    for n in matches:
-        e = vault.entries[n]
-        tag_str = f" {C.dim('[' + ','.join(e.tags) + ']')}" if e.tags else ""
-        print(f"  • {n}{tag_str}")
+    if matches:
+        print(C.bold(f"\n{len(matches)} exact match(es):"))
+        for n in matches:
+            e = vault.entries[n]
+            star = C.yellow("★ ") if e.favorite else ""
+            tag_str = f" {C.dim('[' + ','.join(e.tags) + ']')}" if e.tags else ""
+            print(f"  • {star}{n}{tag_str}")
+    else:
+        print(C.dim("\nNo exact matches."))
+
+    # Fuzzy secondary section when query present and fuzzy enabled
+    if fuzzy and query:
+        fuzzy_hits = vault.fuzzy_search(
+            query, tag=tag, limit=10, cutoff=0.4, exclude=matches
+        )
+        if fuzzy_hits:
+            print(C.bold(f"\nFuzzy matches (ranked):"))
+            for n, score in fuzzy_hits:
+                e = vault.entries[n]
+                star = C.yellow("★ ") if e.favorite else ""
+                tag_str = f" {C.dim('[' + ','.join(e.tags) + ']')}" if e.tags else ""
+                print(f"  • {star}{n}{tag_str}  {C.dim(f'score={score:.2f}')}")
+        elif not matches:
+            print(C.dim("No fuzzy matches either."))
     print()
+
+
+def cmd_pin(vault: Vault, name: Optional[str] = None) -> None:
+    if not name:
+        name = prompt("Entry to pin")
+    if not name:
+        return
+    if name not in vault.entries:
+        print(C.red(f"No entry named '{name}'.\n"))
+        return
+    vault.pin(name)
+    print(C.green(f"Pinned '{name}' as favorite.\n"))
+
+
+def cmd_unpin(vault: Vault, name: Optional[str] = None) -> None:
+    if not name:
+        name = prompt("Entry to unpin")
+    if not name:
+        return
+    if name not in vault.entries:
+        print(C.red(f"No entry named '{name}'.\n"))
+        return
+    vault.unpin(name)
+    print(C.green(f"Unpinned '{name}'.\n"))
 
 
 def cmd_edit(vault: Vault, name: Optional[str] = None) -> None:
@@ -363,6 +435,10 @@ def cmd_edit(vault: Vault, name: Optional[str] = None) -> None:
     e.tags = [t.strip() for t in new_tags.split(",") if t.strip()]
     e.notes = prompt("Notes", e.notes)
     e.totp_secret = prompt("TOTP secret", e.totp_secret)
+    if prompt_yn("Favorite / pinned?", default=e.favorite):
+        e.favorite = True
+    else:
+        e.favorite = False
     e.updated_at = time.time()
 
     vault.entries[name] = e
@@ -413,7 +489,7 @@ def cmd_generate() -> None:
     print(C.dim(f"  Strength: {bits:.0f} bits — {strength_label(bits)}\n"))
     if CLIPBOARD_AVAILABLE and prompt_yn("Copy to clipboard?"):
         if copy_with_autoclear(pw):
-            print(C.green(f"Copied. Auto-clear in {CLIPBOARD_CLEAR_SECONDS}s.\n"))
+            print(C.green(f"Copied. Auto-clear in {_clipboard_timeout}s.\n"))
 
 
 def cmd_export(vault: Vault) -> None:
@@ -427,6 +503,31 @@ def cmd_export(vault: Vault) -> None:
         return
     vault.export_encrypted(out, pw1)
     print(C.green(f"Exported {len(vault.entries)} entries to {out}\n"))
+
+
+def cmd_export_csv(
+    vault: Vault,
+    path: Optional[str] = None,
+    i_understand: bool = False,
+) -> None:
+    print(C.red(C.bold("WARNING: CSV export writes passwords and TOTP secrets in PLAINTEXT.")))
+    print(C.yellow("Anyone with the file can read all credentials. Prefer encrypted export."))
+    if not i_understand:
+        confirm = prompt('Type YES (all caps) to confirm plaintext export')
+        if confirm != "YES":
+            print(C.dim("Export cancelled.\n"))
+            return
+    if not path:
+        path = prompt("CSV file path", "vault_export.csv")
+    if not path:
+        return
+    try:
+        n = vault.export_csv(path)
+    except OSError as e:
+        print(C.red(f"Export failed: {e}\n"))
+        return
+    print(C.green(f"Wrote {n} entries to {path}"))
+    print(C.red("Remember: this file is unencrypted. Delete it when done.\n"))
 
 
 def cmd_import(vault: Vault) -> None:
@@ -511,6 +612,142 @@ def cmd_audit(vault: Vault) -> None:
     print_audit_report(report)
 
 
+def cmd_stats(vault: Vault) -> None:
+    s = vault.stats()
+    print()
+    print(C.bold(C.cyan("=== Vault Stats ===")))
+    print(f"  Entries:     {s['total_entries']}")
+    print(f"  Favorites:   {s['favorites']}")
+    print(f"  With TOTP:   {s['with_totp']}")
+    print(f"  Without TOTP:{s['without_totp']}")
+    print(f"  Health score:{health_score_color(s['health_score'])}")
+    if s["tags"]:
+        print(C.bold("  Tags:"))
+        for tag, count in s["tags"].items():
+            print(f"    • {tag}: {count}")
+    else:
+        print(f"  Tags:        {C.dim('(none)')}")
+    if s["oldest_updated"]:
+        o = s["oldest_updated"]
+        print(f"  Oldest update: {o['name']} ({time.ctime(o['updated_at'])})")
+    if s["newest_updated"]:
+        n = s["newest_updated"]
+        print(f"  Newest update: {n['name']} ({time.ctime(n['updated_at'])})")
+    print()
+
+
+def cmd_completions(shell: str) -> int:
+    """Print a shell completion script for bash or zsh."""
+    commands = [
+        "add",
+        "view",
+        "search",
+        "edit",
+        "delete",
+        "pin",
+        "unpin",
+        "gen",
+        "export",
+        "export-csv",
+        "import",
+        "import-csv",
+        "master",
+        "audit",
+        "stats",
+        "completions",
+    ]
+    if shell == "bash":
+        script = f"""# pwmanager bash completion — eval "$(pwmanager completions bash)"
+_pwmanager_completions() {{
+  local cur prev
+  COMPREPLY=()
+  cur="${{COMP_WORDS[COMP_CWORD]}}"
+  prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+  local cmds="{' '.join(commands)}"
+  local opts="--vault --version --clipboard-timeout --lock-timeout --help"
+
+  if [[ ${{COMP_CWORD}} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "${{cmds}} ${{opts}}" -- "${{cur}}") )
+    return 0
+  fi
+  case "${{prev}}" in
+    completions)
+      COMPREPLY=( $(compgen -W "bash zsh" -- "${{cur}}") )
+      ;;
+    --vault|export-csv|import-csv)
+      COMPREPLY=( $(compgen -f -- "${{cur}}") )
+      ;;
+    search)
+      COMPREPLY=( $(compgen -W "--tag --fuzzy --no-fuzzy" -- "${{cur}}") )
+      ;;
+    *)
+      COMPREPLY=()
+      ;;
+  esac
+}}
+complete -F _pwmanager_completions pwmanager
+"""
+        print(script)
+        return 0
+    if shell == "zsh":
+        script = f"""#compdef pwmanager
+# pwmanager zsh completion — eval "$(pwmanager completions zsh)"
+_pwmanager() {{
+  local -a cmds
+  cmds=(
+    'add:add entry'
+    'view:view / list entries'
+    'search:search entries (exact + fuzzy)'
+    'edit:edit entry'
+    'delete:delete entry'
+    'pin:pin entry as favorite'
+    'unpin:unpin favorite'
+    'gen:generate password / passphrase'
+    'export:encrypted export'
+    'export-csv:plaintext CSV export (dangerous)'
+    'import:encrypted import'
+    'import-csv:import from CSV'
+    'master:change master password'
+    'audit:security audit'
+    'stats:vault statistics'
+    'completions:print shell completions'
+  )
+  _arguments \\
+    '--vault[Path to vault file]:file:_files' \\
+    '--clipboard-timeout[Clipboard clear seconds]:seconds:' \\
+    '--lock-timeout[Idle lock seconds]:seconds:' \\
+    '--version[Show version]' \\
+    '--help[Show help]' \\
+    '1:command:->cmds' \\
+    '*::arg:->args'
+
+  case $state in
+    cmds)
+      _describe 'command' cmds
+      ;;
+    args)
+      case $words[1] in
+        completions)
+          _values 'shell' bash zsh
+          ;;
+        export-csv|import-csv)
+          _files
+          ;;
+        search)
+          _arguments '--tag[Filter by tag]:tag:' '--fuzzy' '--no-fuzzy'
+          ;;
+      esac
+      ;;
+  esac
+}}
+_pwmanager
+"""
+        print(script)
+        return 0
+    print(C.red(f"Unknown shell: {shell}. Use bash or zsh."), file=sys.stderr)
+    return 1
+
+
 # =============================================================================
 # Interactive menu
 # =============================================================================
@@ -519,7 +756,7 @@ MENU = f"""
 {C.bold('Commands')}
   {C.cyan('1')}  add         add entry
   {C.cyan('2')}  view        view / list entries
-  {C.cyan('3')}  search      search entries
+  {C.cyan('3')}  search      search entries (exact + fuzzy)
   {C.cyan('4')}  edit        edit entry
   {C.cyan('5')}  delete      delete entry
   {C.cyan('6')}  generate    generate password / passphrase
@@ -528,6 +765,10 @@ MENU = f"""
   {C.cyan('9')}  master      change master password
   {C.cyan('a')}  audit       security audit & health score
   {C.cyan('c')}  import-csv  import from Bitwarden/Chrome CSV
+  {C.cyan('e')}  export-csv  plaintext CSV export (dangerous)
+  {C.cyan('p')}  pin         pin entry as favorite
+  {C.cyan('u')}  unpin       unpin favorite
+  {C.cyan('s')}  stats       vault statistics
   {C.cyan('l')}  lock        lock vault
   {C.cyan('q')}  quit
 """
@@ -544,10 +785,12 @@ def interactive(vault: Vault) -> None:
         # Health score banner
         if vault.entries:
             report = audit_vault(vault)
+            fav_n = sum(1 for e in vault.entries.values() if e.favorite)
+            fav_str = f", {fav_n} ★" if fav_n else ""
             print(
                 f"\n{C.dim('Password health:')} "
                 f"{health_score_color(report.health_score)}"
-                f"{C.dim(f'  ({report.total_entries} entries)')}"
+                f"{C.dim(f'  ({report.total_entries} entries{fav_str})')}"
             )
         else:
             print(f"\n{C.dim('Password health:')} {C.green('100/100')} {C.dim('(empty)')}")
@@ -579,6 +822,14 @@ def interactive(vault: Vault) -> None:
                 cmd_audit(vault)
             elif choice in ("c", "import-csv", "csv"):
                 cmd_import_csv(vault)
+            elif choice in ("e", "export-csv"):
+                cmd_export_csv(vault)
+            elif choice in ("p", "pin"):
+                cmd_pin(vault)
+            elif choice in ("u", "unpin"):
+                cmd_unpin(vault)
+            elif choice in ("s", "stats"):
+                cmd_stats(vault)
             elif choice in ("l", "lock"):
                 vault.lock()
                 print(C.yellow("Locked."))
@@ -599,13 +850,36 @@ def interactive(vault: Vault) -> None:
 # =============================================================================
 
 
+def default_vault_path() -> str:
+    """Vault path from PWMANAGER_VAULT env, else default."""
+    return os.environ.get("PWMANAGER_VAULT") or DEFAULT_VAULT_PATH
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pwmanager",
-        description="Advanced local password manager (v2)",
+        description="Advanced local password manager (v2.1)",
     )
-    p.add_argument("--vault", default=DEFAULT_VAULT_PATH, help="Path to vault file")
+    p.add_argument(
+        "--vault",
+        default=None,
+        help="Path to vault file (default: $PWMANAGER_VAULT or ./vault.json)",
+    )
     p.add_argument("--version", action="version", version=f"pwmanager {__version__}")
+    p.add_argument(
+        "--clipboard-timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=f"Clipboard auto-clear seconds (default: {CLIPBOARD_CLEAR_SECONDS})",
+    )
+    p.add_argument(
+        "--lock-timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=f"Idle auto-lock seconds (default: {AUTOLOCK_SECONDS})",
+    )
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("add").add_argument("name", nargs="?")
@@ -613,9 +887,27 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("edit").add_argument("name", nargs="?")
     sub.add_parser("delete").add_argument("name", nargs="?")
 
-    s = sub.add_parser("search", help="Search entries (case-insensitive substring)")
+    pin_p = sub.add_parser("pin", help="Pin entry as favorite")
+    pin_p.add_argument("name", nargs="?")
+    unpin_p = sub.add_parser("unpin", help="Unpin favorite entry")
+    unpin_p.add_argument("name", nargs="?")
+
+    s = sub.add_parser("search", help="Search entries (exact + fuzzy)")
     s.add_argument("query", nargs="?", default=None, help="Search query")
     s.add_argument("--tag", default=None, help="Filter by tag")
+    s.add_argument(
+        "--fuzzy",
+        dest="fuzzy",
+        action="store_true",
+        default=True,
+        help="Include fuzzy secondary results (default)",
+    )
+    s.add_argument(
+        "--no-fuzzy",
+        dest="fuzzy",
+        action="store_false",
+        help="Disable fuzzy matches",
+    )
 
     g = sub.add_parser("gen", help="Generate password (no vault needed)")
     g.add_argument("--length", type=int, default=20)
@@ -625,9 +917,21 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--words", type=int, default=5)
 
     sub.add_parser("export")
+    ec = sub.add_parser(
+        "export-csv",
+        help="Export vault as PLAINTEXT CSV (dangerous — requires confirmation)",
+    )
+    ec.add_argument("path", nargs="?", default=None, help="Output CSV path")
+    ec.add_argument(
+        "--i-understand",
+        action="store_true",
+        help="Skip interactive YES confirmation (for scripts)",
+    )
+
     sub.add_parser("import")
     sub.add_parser("master")
     sub.add_parser("audit", help="Run vault security audit")
+    sub.add_parser("stats", help="Show vault statistics")
 
     ic = sub.add_parser("import-csv", help="Import entries from CSV")
     ic.add_argument("file", help="Path to CSV file")
@@ -644,6 +948,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="skip",
         help="What to do when entry name already exists",
     )
+
+    comp = sub.add_parser("completions", help="Print shell completion script")
+    comp.add_argument(
+        "shell",
+        choices=["bash", "zsh"],
+        help="Shell to generate completions for",
+    )
     return p
 
 
@@ -651,7 +962,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # `gen` is the only command that doesn't need the vault
+    if args.clipboard_timeout is not None:
+        set_clipboard_timeout(args.clipboard_timeout)
+
+    # Completions and gen don't need the vault
+    if args.command == "completions":
+        return cmd_completions(args.shell)
+
     if args.command == "gen":
         try:
             if args.passphrase:
@@ -675,7 +992,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(C.dim("(install argon2-cffi for stronger key derivation)"))
     print()
 
-    vault = Vault(args.vault)
+    vault_path = args.vault if args.vault is not None else default_vault_path()
+    lock_timeout = args.lock_timeout if args.lock_timeout is not None else AUTOLOCK_SECONDS
+    vault = Vault(vault_path, lock_timeout=lock_timeout)
     if not unlock_or_create(vault):
         return 1
 
@@ -690,20 +1009,33 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_edit(vault, getattr(args, "name", None))
         elif args.command == "delete":
             cmd_delete(vault, getattr(args, "name", None))
+        elif args.command == "pin":
+            cmd_pin(vault, getattr(args, "name", None))
+        elif args.command == "unpin":
+            cmd_unpin(vault, getattr(args, "name", None))
         elif args.command == "search":
             cmd_search(
                 vault,
                 query=getattr(args, "query", None),
                 tag=getattr(args, "tag", None),
+                fuzzy=getattr(args, "fuzzy", True),
             )
         elif args.command == "export":
             cmd_export(vault)
+        elif args.command == "export-csv":
+            cmd_export_csv(
+                vault,
+                path=getattr(args, "path", None),
+                i_understand=getattr(args, "i_understand", False),
+            )
         elif args.command == "import":
             cmd_import(vault)
         elif args.command == "master":
             cmd_change_master(vault)
         elif args.command == "audit":
             cmd_audit(vault)
+        elif args.command == "stats":
+            cmd_stats(vault)
         elif args.command == "import-csv":
             cmd_import_csv(
                 vault,
