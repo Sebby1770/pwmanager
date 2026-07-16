@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pwmanager"
+version = "2.0.0"
+description = "Local encrypted password manager with TOTP, audit, and CSV import"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Sebby1770" }]
+keywords = ["password-manager", "totp", "encryption", "cli", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "cryptography>=42.0.0",
+]
+
+[project.optional-dependencies]
+full = [
+    "argon2-cffi>=23.1.0",
+    "pyperclip>=1.8.2",
+]
+test = [
+    "pytest>=7",
+]
+
+[project.scripts]
+pwmanager = "pwmanager.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Sebby1770/pwmanager"
+Repository = "https://github.com/Sebby1770/pwmanager"
+Security = "https://github.com/Sebby1770/pwmanager/blob/main/SECURITY.md"
+
+[tool.setuptools.packages.find]
+include = ["pwmanager*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
