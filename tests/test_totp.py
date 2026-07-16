@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from pwmanager.totp import totp_at, totp_now, totp_seconds_remaining
+from pwmanager.totp import totp_at, totp_now, totp_seconds_remaining, totp_uri
 
 
 # RFC 6238 Appendix B uses ASCII secret "12345678901234567890" with SHA-1.
@@ -61,3 +61,26 @@ def test_totp_seconds_remaining_range(monkeypatch):
     rem = totp_seconds_remaining(period=30)
     assert 1 <= rem <= 30
     assert rem == 20
+
+
+def test_totp_uri_format():
+    uri = totp_uri("JBSWY3DPEHPK3PXP", "github", issuer="pwmanager")
+    assert uri.startswith("otpauth://totp/")
+    assert "secret=JBSWY3DPEHPK3PXP" in uri
+    assert "issuer=pwmanager" in uri
+    assert "digits=6" in uri
+    assert "period=30" in uri
+    assert "github" in uri
+
+
+def test_totp_uri_encodes_special_chars():
+    uri = totp_uri("JBSWY3DPEHPK3PXP", "my account", issuer="My App")
+    assert uri.startswith("otpauth://totp/")
+    assert "secret=JBSWY3DPEHPK3PXP" in uri
+    # spaces encoded in label or params
+    assert " " not in uri.split("?", 1)[0].replace("otpauth://totp/", "")
+
+
+def test_totp_uri_empty_secret_raises():
+    with pytest.raises(ValueError, match="empty"):
+        totp_uri("", "name")

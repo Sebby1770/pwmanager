@@ -64,19 +64,21 @@ Derived key is urlsafe-base64-encoded for Fernet.
 ```
 
 Entry fields (inside the encrypted payload): `username`, `password`, `url`,
-`notes`, `tags`, `totp_secret`, `history`, `created_at`, `updated_at`.
+`notes`, `tags`, `totp_secret`, `history`, `created_at`, `updated_at`,
+`favorite` (optional, default false).
 
 ## Operational recommendations
 
 1. **Master password** — long passphrase (≥ 5 random words) or ≥ 16 chars with high entropy. There is **no recovery**.
 2. **Install Argon2** — `pip install "pwmanager[full]"` so Argon2id is used.
 3. **Permissions** — keep `vault.json` on an encrypted volume; restrict file mode (`chmod 600 vault.json`).
-4. **Backups** — use encrypted export; never commit vault files to git (see `.gitignore`).
-5. **Clipboard** — auto-clear reduces exposure; still avoid copying secrets on shared machines.
-6. **Auto-lock** — idle lock (5 minutes) helps; lock manually when stepping away.
-7. **Updates** — keep `cryptography` and Python patched.
-8. **Audit** — run `pwmanager audit` regularly; fix reused and weak passwords first.
-9. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
+4. **Backups** — use **encrypted** export; never commit vault files to git (see `.gitignore`).
+5. **Plaintext CSV export** — `export-csv` writes passwords and TOTP secrets in cleartext. Require typing `YES` or `--i-understand`. Treat the file as highly sensitive and delete it when finished.
+6. **Clipboard** — auto-clear (`--clipboard-timeout`) reduces exposure; still avoid copying secrets on shared machines.
+7. **Auto-lock** — idle lock (default 5 minutes, `--lock-timeout`) helps; lock manually when stepping away.
+8. **Updates** — keep `cryptography` and Python patched.
+9. **Audit / stats** — run `pwmanager audit` and `pwmanager stats` regularly; fix reused and weak passwords first.
+10. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
 
 ## Reporting issues
 
