@@ -51,6 +51,8 @@ Derived key is urlsafe-base64-encoded for Fernet.
 - A separate **HMAC-SHA256** over `salt|vault` (using the derived key) detects
   tampering of the on-disk wrapper. Wrong master password and tampering both
   surface as decryption failure (`InvalidToken`).
+- **`pwmanager verify`** re-reads the vault file, recomputes the HMAC, and
+  confirms the ciphertext still decrypts — without listing entry contents.
 
 ### Vault file format (v2)
 
@@ -66,7 +68,11 @@ Derived key is urlsafe-base64-encoded for Fernet.
 
 Entry fields (inside the encrypted payload): `username`, `password`, `url`,
 `notes`, `tags`, `totp_secret`, `history`, `created_at`, `updated_at`,
-`favorite` (optional, default false), `kind` (`login` | `note`, default `login`).
+`favorite` (optional, default false), `kind` (`login` | `note`, default `login`),
+`rotate_after_days` (optional, default null → global 90-day rotation window),
+`last_accessed` (optional, default 0).
+
+Older vaults load with safe defaults for new fields (`Entry.from_dict`).
 
 ## Have I Been Pwned (HIBP) — optional network feature
 
@@ -103,20 +109,51 @@ for normal vault use.
   analysis of hash prefixes (theoretical risk; prefixes alone do not reveal passwords).
 - Prefer running HIBP checks on a trusted connection.
 
+## `--password-env` / `PWMANAGER_PASSWORD` (INSECURE)
+
+By default, the master password is **always read via an interactive prompt**
+(`getpass`). For automated tests or tightly controlled pipelines only, you may
+pass **`--password-env`**, which reads the master password from the
+`PWMANAGER_PASSWORD` environment variable.
+
+| Do | Don't |
+|----|--------|
+| Use only with disposable test vaults | Put production master passwords in env files, Compose, or shell rc |
+| Unset the variable immediately after use | Log or echo `PWMANAGER_PASSWORD` |
+| Prefer OS keychain / secret stores outside this tool | Commit env files that contain real passwords |
+| Keep the flag off for daily interactive use | Assume process environment is private on multi-user hosts |
+
+Environment variables are visible to other processes with sufficient privilege,
+appear in some crash dumps, and are easy to leak via CI logs. **This flag is an
+explicit insecure opt-in** — not a recommended production unlock method.
+
+## Plaintext export (`export-csv` / `export-json`)
+
+Both commands write **passwords, notes, and TOTP secrets in cleartext**.
+
+- Interactive use requires typing `YES` (all caps).
+- Scripts must pass **`--i-understand`**.
+- Prefer **encrypted** `export` for backups and machine moves.
+- Delete plaintext files when migration is finished.
+- **Never commit** `vault.json`, `*.vault.json`, CSV, or JSON exports to git
+  (see `.gitignore`).
+
 ## Operational recommendations
 
 1. **Master password** — long passphrase (≥ 5 random words) or ≥ 16 chars with high entropy. There is **no recovery**.
-2. **Install Argon2** — `pip install "pwmanager[full]"` so Argon2id is used.
+2. **Install Argon2** — `pip install "pwmanager[full]"` so Argon2id is used. Run `pwmanager doctor` to confirm.
 3. **Permissions** — keep vault files on an encrypted volume; restrict file mode (`chmod 600`).
-4. **Backups** — use **encrypted** export; never commit vault files to git (see `.gitignore`).
-5. **Plaintext CSV export** — `export-csv` writes passwords and TOTP secrets in cleartext. Require typing `YES` or `--i-understand`. Treat the file as highly sensitive and delete it when finished.
-6. **Clipboard** — auto-clear (`--clipboard-timeout`) reduces exposure; still avoid copying secrets on shared machines.
-7. **Auto-lock** — idle lock (default 5 minutes, `--lock-timeout`) helps; lock manually when stepping away.
-8. **Updates** — keep `cryptography` and Python patched.
-9. **Audit / stats / HIBP** — run `pwmanager audit` regularly; use `--hibp` when online; fix reused, weak, and breached passwords first.
-10. **Profiles** — keep separate vaults for work/personal under `~/.config/pwmanager/`; do not sync vaults via unencrypted cloud folders.
-11. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
-12. **History / TOTP watch** — history browser shows previous passwords only while the vault is unlocked; live TOTP is terminal-only.
+4. **Backups** — use **encrypted** export; never commit vault files to git.
+5. **Plaintext CSV/JSON export** — treat as highly sensitive; delete when finished.
+6. **Clipboard** — `get --copy` and interactive copy use auto-clear (`--clipboard-timeout`); still avoid shared machines.
+7. **Auto-lock** — idle lock (default 5 minutes) clears the terminal screen in interactive mode; lock manually when stepping away.
+8. **Rotation** — audit flags passwords older than 90 days (or per-entry `rotate_after_days`); use `touch` after rotating.
+9. **Updates** — keep `cryptography` and Python patched.
+10. **Audit / stats / HIBP / verify** — run `audit` regularly; `verify` after copies or sync; use `--hibp` when online.
+11. **Profiles** — keep separate vaults for work/personal under `~/.config/pwmanager/`; do not sync vaults via unencrypted cloud folders.
+12. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
+13. **History / TOTP watch** — history browser shows previous passwords only while unlocked; live TOTP is terminal-only.
+14. **Automation** — avoid `--password-env` except for ephemeral test vaults.
 
 ## Reporting issues
 

@@ -25,6 +25,8 @@ from pwmanager.constants import (
 )
 from pwmanager.crypto import ARGON2_AVAILABLE, decrypt_bytes, derive_key
 from pwmanager.generators import (
+    GENERATOR_PRESETS,
+    generate_from_preset,
     generate_passphrase,
     generate_password,
     password_entropy_bits,
@@ -65,7 +67,12 @@ def set_clipboard_timeout(seconds: int) -> None:
     _clipboard_timeout = max(1, int(seconds))
 
 
-def copy_with_autoclear(text: str, seconds: Optional[int] = None) -> bool:
+def copy_with_autoclear(
+    text: str,
+    seconds: Optional[int] = None,
+    *,
+    autoclear: bool = True,
+) -> bool:
     global _clipboard_timer
     if not CLIPBOARD_AVAILABLE:
         return False
@@ -74,6 +81,9 @@ def copy_with_autoclear(text: str, seconds: Optional[int] = None) -> bool:
         pyperclip.copy(text)
     except Exception:
         return False
+
+    if not autoclear:
+        return True
 
     if _clipboard_timer:
         _clipboard_timer.cancel()
@@ -90,6 +100,15 @@ def copy_with_autoclear(text: str, seconds: Optional[int] = None) -> bool:
     _clipboard_timer.daemon = True
     _clipboard_timer.start()
     return True
+
+
+def clear_screen() -> None:
+    """ANSI clear screen + home cursor (optional idle lock UX)."""
+    try:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -198,8 +217,38 @@ def print_entry(name: str, e: Entry, show_password: bool = True) -> None:
 # =============================================================================
 
 
-def unlock_or_create(vault: Vault) -> bool:
+def unlock_or_create(
+    vault: Vault,
+    *,
+    password_env: bool = False,
+    quiet: bool = False,
+) -> bool:
+    """Unlock vault or create a new one.
+
+    If ``password_env`` is True, read master password from ``PWMANAGER_PASSWORD``
+    (explicit opt-in only — insecure for production; intended for automation/tests).
+    """
+    env_pw: Optional[str] = None
+    if password_env:
+        env_pw = os.environ.get("PWMANAGER_PASSWORD")
+        if not env_pw:
+            print(
+                C.red(
+                    "--password-env set but PWMANAGER_PASSWORD is empty/unset."
+                ),
+                file=sys.stderr,
+            )
+            return False
+
     if not vault.exists():
+        if env_pw is not None:
+            if len(env_pw) < 10:
+                print(C.red("Master password from env must be at least 10 characters."))
+                return False
+            vault.create(env_pw)
+            if not quiet:
+                print(C.green("Vault created.\n"))
+            return True
         print(C.cyan("No vault found. Let's create one."))
         if ARGON2_AVAILABLE:
             print(C.dim("Using Argon2id for key derivation."))
@@ -225,6 +274,22 @@ def unlock_or_create(vault: Vault) -> bool:
         print(C.green("Vault created.\n"))
         return True
 
+    if env_pw is not None:
+        try:
+            vault.unlock(env_pw)
+            if not quiet:
+                print(
+                    C.green(f"Vault unlocked. {len(vault.entries)} entries.")
+                    + C.dim(f" (KDF: {vault.kdf_used})\n")
+                )
+            return True
+        except InvalidToken:
+            print(C.red("Wrong password (from PWMANAGER_PASSWORD)."), file=sys.stderr)
+            return False
+        except (ValueError, FileNotFoundError) as e:
+            print(C.red(f"Error: {e}"), file=sys.stderr)
+            return False
+
     backoff = 1.0
     for attempt in range(1, MAX_UNLOCK_ATTEMPTS + 1):
         pw = prompt_secret("Master password")
@@ -232,10 +297,11 @@ def unlock_or_create(vault: Vault) -> bool:
             return False
         try:
             vault.unlock(pw)
-            print(
-                C.green(f"Vault unlocked. {len(vault.entries)} entries.")
-                + C.dim(f" (KDF: {vault.kdf_used})\n")
-            )
+            if not quiet:
+                print(
+                    C.green(f"Vault unlocked. {len(vault.entries)} entries.")
+                    + C.dim(f" (KDF: {vault.kdf_used})\n")
+                )
             return True
         except InvalidToken:
             remaining = MAX_UNLOCK_ATTEMPTS - attempt
@@ -451,11 +517,213 @@ def cmd_view(vault: Vault, name: Optional[str] = None) -> None:
         print()
         return
     print_entry(name, e)
+    try:
+        vault.mark_accessed(name)
+    except KeyError:
+        pass
     if e.password and CLIPBOARD_AVAILABLE and prompt_yn("Copy password to clipboard?"):
         if copy_with_autoclear(e.password):
             print(C.green(f"Copied. Will clear in {_clipboard_timeout}s.\n"))
         else:
             print(C.red("Clipboard copy failed.\n"))
+
+
+def cmd_get(
+    vault: Vault,
+    name: Optional[str] = None,
+    *,
+    copy_field: Optional[str] = None,
+) -> int:
+    """One-shot get: print and/or copy a single field (scripting-friendly).
+
+    ``copy_field`` is one of: password, username, totp, url.
+    With --copy, copies to clipboard and exits (no interactive prompt).
+    Without --copy, prints the field value to stdout only.
+    """
+    if not name:
+        name = prompt("Entry name")
+    if not name:
+        print(C.red("Entry name required."), file=sys.stderr)
+        return 1
+    e = vault.entries.get(name)
+    if not e:
+        print(C.red(f"No entry named '{name}'."), file=sys.stderr)
+        return 1
+
+    field = (copy_field or "password").strip().lower()
+    value = ""
+    if field == "password":
+        value = e.password or ""
+    elif field == "username":
+        value = e.username or ""
+    elif field == "url":
+        value = e.url or ""
+    elif field == "totp":
+        if not e.totp_secret:
+            print(C.red(f"'{name}' has no TOTP secret."), file=sys.stderr)
+            return 1
+        try:
+            value = totp_now(e.totp_secret)
+        except ValueError as err:
+            print(C.red(f"TOTP error: {err}"), file=sys.stderr)
+            return 1
+    else:
+        print(
+            C.red(f"Unknown field '{field}'. Use password|username|totp|url."),
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        vault.mark_accessed(name)
+    except KeyError:
+        pass
+
+    if copy_field is not None:
+        # Scripting path: copy only, minimal stdout noise
+        if not CLIPBOARD_AVAILABLE:
+            print(
+                C.red("Clipboard unavailable (install pyperclip)."),
+                file=sys.stderr,
+            )
+            return 1
+        if not value:
+            print(C.yellow(f"Field '{field}' is empty for '{name}'."), file=sys.stderr)
+        ok = copy_with_autoclear(value, autoclear=True)
+        if not ok:
+            print(C.red("Clipboard copy failed."), file=sys.stderr)
+            return 1
+        print(f"Copied {field} for '{name}' (auto-clear in {_clipboard_timeout}s).", file=sys.stderr)
+        return 0
+
+    # No --copy: print value to stdout for pipelines
+    print(value)
+    return 0
+
+
+def cmd_touch(vault: Vault, name: Optional[str] = None) -> int:
+    """Mark entry as rotated: refresh updated_at without changing the password."""
+    if not name:
+        name = prompt("Entry name to mark rotated")
+    if not name:
+        print(C.red("Entry name required."), file=sys.stderr)
+        return 1
+    if name not in vault.entries:
+        print(C.red(f"No entry named '{name}'.\n"))
+        return 1
+    vault.touch_entry(name)
+    print(C.green(f"Touched '{name}' (updated_at refreshed).\n"))
+    return 0
+
+
+def cmd_verify(vault: Vault) -> int:
+    """Unlock already done; recompute HMAC and report OK/fail without listing entries."""
+    ok, msg = vault.verify_integrity()
+    if ok:
+        print(C.green(f"verify: {msg}"))
+        return 0
+    print(C.red(f"verify: FAIL — {msg}"), file=sys.stderr)
+    return 1
+
+
+def cmd_recent(vault: Vault, limit: int = 10) -> None:
+    names = vault.recent(limit=limit)
+    if not names:
+        print(C.dim("No recently accessed entries.\n"))
+        return
+    print()
+    print(C.bold(C.cyan(f"=== Recent ({len(names)}) ===")))
+    for n in names:
+        e = vault.entries[n]
+        ts = e.last_accessed or 0
+        when = time.ctime(ts) if ts else "?"
+        star = C.yellow("★ ") if e.favorite else ""
+        kind = C.dim(" [note]") if e.is_note() else ""
+        print(f"  • {star}{n}{kind}  {C.dim(when)}")
+    print()
+
+
+def cmd_doctor(vault_path: Optional[str] = None) -> int:
+    """Self-test: argon2, clipboard, vault path writable, crypto roundtrip."""
+    import tempfile
+
+    from pwmanager.crypto import decrypt_bytes, encrypt_bytes, generate_salt
+
+    print()
+    print(C.bold(C.cyan("=== pwmanager doctor ===")))
+    failures = 0
+
+    def check(label: str, ok: bool, detail: str = "", *, critical: bool = True) -> None:
+        nonlocal failures
+        if ok:
+            status = C.green("OK")
+        elif critical:
+            status = C.red("FAIL")
+            failures += 1
+        else:
+            status = C.yellow("WARN")
+        extra = f" — {detail}" if detail else ""
+        print(f"  [{status}] {label}{extra}")
+
+    # Optional deps: warn only (still exit 0 if crypto works)
+    check(
+        "argon2-cffi available",
+        ARGON2_AVAILABLE,
+        "recommended for Argon2id" if ARGON2_AVAILABLE else "install argon2-cffi",
+        critical=False,
+    )
+    check(
+        "clipboard (pyperclip) available",
+        CLIPBOARD_AVAILABLE,
+        "optional" if CLIPBOARD_AVAILABLE else "install pyperclip",
+        critical=False,
+    )
+
+    path = vault_path or default_vault_path()
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    writable = os.path.isdir(parent) and os.access(parent, os.W_OK)
+    check(f"vault parent writable ({parent})", writable)
+
+    # Crypto roundtrip with temp key
+    crypto_ok = False
+    crypto_detail = ""
+    try:
+        salt = generate_salt()
+        key, kdf_used = derive_key("doctor-self-test-master!!", salt, "pbkdf2")
+        token = encrypt_bytes(b'{"doctor":true}', key)
+        plain = decrypt_bytes(token, key)
+        crypto_ok = plain == b'{"doctor":true}'
+        crypto_detail = f"KDF={kdf_used}"
+    except Exception as e:
+        crypto_detail = str(e)
+    check("crypto encrypt/decrypt roundtrip", crypto_ok, crypto_detail)
+
+    # Temp vault create/unlock
+    vault_ok = False
+    vault_detail = ""
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            vp = os.path.join(td, "doctor.vault.json")
+            v = Vault(vp)
+            v.create("doctor-self-test-master!!", kdf="pbkdf2")
+            v.add("probe", Entry(username="u", password="p-fake-Aa1!"))
+            v.lock()
+            v2 = Vault(vp)
+            v2.unlock("doctor-self-test-master!!")
+            ok_hmac, msg = v2.verify_integrity()
+            vault_ok = ok_hmac and "probe" in v2.entries
+            vault_detail = msg if ok_hmac else f"integrity: {msg}"
+            v2.lock()
+    except Exception as e:
+        vault_detail = str(e)
+    check("vault create/unlock/HMAC", vault_ok, vault_detail)
+
+    print()
+    if failures:
+        print(C.yellow(f"doctor: {failures} critical check(s) failed.\n"))
+        return 1
+    print(C.green("doctor: all critical checks passed.\n"))
+    return 0
 
 
 def cmd_search(
@@ -654,6 +922,37 @@ def cmd_export_csv(
         return
     try:
         n = vault.export_csv(path)
+    except OSError as e:
+        print(C.red(f"Export failed: {e}\n"))
+        return
+    print(C.green(f"Wrote {n} entries to {path}"))
+    print(C.red("Remember: this file is unencrypted. Delete it when done.\n"))
+
+
+def cmd_export_json(
+    vault: Vault,
+    path: Optional[str] = None,
+    i_understand: bool = False,
+) -> None:
+    print(
+        C.red(
+            C.bold(
+                "WARNING: JSON export writes passwords and TOTP secrets in PLAINTEXT."
+            )
+        )
+    )
+    print(C.yellow("Anyone with the file can read all credentials. Prefer encrypted export."))
+    if not i_understand:
+        confirm = prompt("Type YES (all caps) to confirm plaintext JSON export")
+        if confirm != "YES":
+            print(C.dim("Export cancelled.\n"))
+            return
+    if not path:
+        path = prompt("JSON file path", "vault_export.json")
+    if not path:
+        return
+    try:
+        n = vault.export_json(path)
     except OSError as e:
         print(C.red(f"Export failed: {e}\n"))
         return
@@ -872,14 +1171,17 @@ def cmd_completions(shell: str) -> int:
         "add",
         "add-note",
         "view",
+        "get",
         "search",
         "edit",
         "delete",
         "pin",
         "unpin",
+        "touch",
         "gen",
         "export",
         "export-csv",
+        "export-json",
         "import",
         "import-csv",
         "master",
@@ -887,6 +1189,9 @@ def cmd_completions(shell: str) -> int:
         "history",
         "totp",
         "stats",
+        "recent",
+        "verify",
+        "doctor",
         "completions",
     ]
     if shell == "bash":
@@ -897,7 +1202,7 @@ _pwmanager_completions() {{
   cur="${{COMP_WORDS[COMP_CWORD]}}"
   prev="${{COMP_WORDS[COMP_CWORD-1]}}"
   local cmds="{' '.join(commands)}"
-  local opts="--vault --profile --version --clipboard-timeout --lock-timeout --help"
+  local opts="--vault --profile --version --clipboard-timeout --lock-timeout --password-env --help"
 
   if [[ ${{COMP_CWORD}} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${{cmds}} ${{opts}}" -- "${{cur}}") )
@@ -907,7 +1212,7 @@ _pwmanager_completions() {{
     completions)
       COMPREPLY=( $(compgen -W "bash zsh" -- "${{cur}}") )
       ;;
-    --vault|export-csv|import-csv)
+    --vault|export-csv|export-json|import-csv)
       COMPREPLY=( $(compgen -f -- "${{cur}}") )
       ;;
     search)
@@ -919,8 +1224,17 @@ _pwmanager_completions() {{
     totp)
       COMPREPLY=( $(compgen -W "--watch" -- "${{cur}}") )
       ;;
+    get)
+      COMPREPLY=( $(compgen -W "--copy" -- "${{cur}}") )
+      ;;
+    --copy)
+      COMPREPLY=( $(compgen -W "password username totp url" -- "${{cur}}") )
+      ;;
+    gen|--preset)
+      COMPREPLY=( $(compgen -W "pin wifi apple max" -- "${{cur}}") )
+      ;;
     add)
-      COMPREPLY=( $(compgen -W "--gen --note --length --no-symbols" -- "${{cur}}") )
+      COMPREPLY=( $(compgen -W "--gen --note --length --no-symbols --preset" -- "${{cur}}") )
       ;;
     *)
       COMPREPLY=()
@@ -940,14 +1254,17 @@ _pwmanager() {{
     'add:add entry'
     'add-note:add secure note'
     'view:view / list entries'
+    'get:get/copy one field (scripting)'
     'search:search entries (exact + fuzzy)'
     'edit:edit entry'
     'delete:delete entry'
     'pin:pin entry as favorite'
     'unpin:unpin favorite'
+    'touch:mark password rotated (refresh updated_at)'
     'gen:generate password / passphrase'
     'export:encrypted export'
     'export-csv:plaintext CSV export (dangerous)'
+    'export-json:plaintext JSON export (dangerous)'
     'import:encrypted import'
     'import-csv:import from CSV'
     'master:change master password'
@@ -955,6 +1272,9 @@ _pwmanager() {{
     'history:password history browser'
     'totp:show / watch TOTP code'
     'stats:vault statistics'
+    'recent:last accessed entries'
+    'verify:vault integrity (HMAC) check'
+    'doctor:self-test environment'
     'completions:print shell completions'
   )
   _arguments \\
@@ -962,6 +1282,7 @@ _pwmanager() {{
     '--profile[Named vault profile]:profile:' \\
     '--clipboard-timeout[Clipboard clear seconds]:seconds:' \\
     '--lock-timeout[Idle lock seconds]:seconds:' \\
+    '--password-env[Read master pw from PWMANAGER_PASSWORD (INSECURE)]' \\
     '--version[Show version]' \\
     '--help[Show help]' \\
     '1:command:->cmds' \\
@@ -976,7 +1297,7 @@ _pwmanager() {{
         completions)
           _values 'shell' bash zsh
           ;;
-        export-csv|import-csv)
+        export-csv|export-json|import-csv)
           _files
           ;;
         search)
@@ -988,9 +1309,16 @@ _pwmanager() {{
         totp)
           _arguments '--watch[Live refresh until Ctrl+C]'
           ;;
+        get)
+          _arguments '--copy[Copy field]:field:(password username totp url)'
+          ;;
+        gen)
+          _arguments '--preset[Policy]:preset:(pin wifi apple max)' \\
+            '--length[Length]:len:' '--no-symbols' '--passphrase'
+          ;;
         add)
           _arguments '--gen[Generate password]' '--note[Create secure note]' \\
-            '--length[Password length]:len:' '--no-symbols'
+            '--length[Password length]:len:' '--no-symbols' '--preset[Policy]:preset:(pin wifi apple max)'
           ;;
       esac
       ;;
@@ -1026,6 +1354,12 @@ MENU = f"""
   {C.cyan('t')}  totp        show / watch TOTP code
   {C.cyan('c')}  import-csv  import from Bitwarden/Chrome CSV
   {C.cyan('e')}  export-csv  plaintext CSV export (dangerous)
+  {C.cyan('j')}  export-json plaintext JSON export (dangerous)
+  {C.cyan('g')}  get         get / copy one field
+  {C.cyan('o')}  touch       mark password rotated
+  {C.cyan('r')}  recent      last accessed entries
+  {C.cyan('v')}  verify      vault integrity (HMAC)
+  {C.cyan('d')}  doctor      self-test
   {C.cyan('p')}  pin         pin entry as favorite
   {C.cyan('u')}  unpin       unpin favorite
   {C.cyan('s')}  stats       vault statistics
@@ -1034,12 +1368,13 @@ MENU = f"""
 """
 
 
-def interactive(vault: Vault) -> None:
+def interactive(vault: Vault, *, password_env: bool = False) -> None:
     while True:
         if vault.is_idle():
+            clear_screen()
             print(C.yellow("\nAuto-locked due to inactivity."))
             vault.lock()
-            if not unlock_or_create(vault):
+            if not unlock_or_create(vault, password_env=password_env):
                 return
 
         # Health score banner
@@ -1094,6 +1429,20 @@ def interactive(vault: Vault) -> None:
                 cmd_import_csv(vault)
             elif choice in ("e", "export-csv"):
                 cmd_export_csv(vault)
+            elif choice in ("j", "export-json"):
+                cmd_export_json(vault)
+            elif choice in ("g", "get"):
+                name = prompt("Entry name")
+                field = prompt("Field (password/username/totp/url)", "password")
+                cmd_get(vault, name or None, copy_field=field or "password")
+            elif choice in ("o", "touch"):
+                cmd_touch(vault)
+            elif choice in ("r", "recent"):
+                cmd_recent(vault)
+            elif choice in ("v", "verify"):
+                cmd_verify(vault)
+            elif choice in ("d", "doctor"):
+                cmd_doctor(vault.path)
             elif choice in ("p", "pin"):
                 cmd_pin(vault)
             elif choice in ("u", "unpin"):
@@ -1101,9 +1450,10 @@ def interactive(vault: Vault) -> None:
             elif choice in ("s", "stats"):
                 cmd_stats(vault)
             elif choice in ("l", "lock"):
+                clear_screen()
                 vault.lock()
                 print(C.yellow("Locked."))
-                if not unlock_or_create(vault):
+                if not unlock_or_create(vault, password_env=password_env):
                     return
             elif choice in ("q", "quit", "exit"):
                 vault.lock()
@@ -1131,7 +1481,7 @@ def default_vault_path(
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pwmanager",
-        description="Advanced local password manager (v2.2)",
+        description="Advanced local password manager (v2.3)",
     )
     p.add_argument(
         "--vault",
@@ -1162,6 +1512,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help=f"Idle auto-lock seconds (default: {AUTOLOCK_SECONDS})",
     )
+    p.add_argument(
+        "--password-env",
+        action="store_true",
+        help=(
+            "INSECURE opt-in: read master password from PWMANAGER_PASSWORD "
+            "(automation/tests only — never use for production)"
+        ),
+    )
     sub = p.add_subparsers(dest="command")
 
     add_p = sub.add_parser("add", help="Add a login entry")
@@ -1179,6 +1537,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_p.add_argument("--length", type=int, default=20, help="Generated password length")
     add_p.add_argument("--no-symbols", action="store_true")
     add_p.add_argument("--avoid-ambiguous", action="store_true")
+    add_p.add_argument(
+        "--preset",
+        choices=sorted(GENERATOR_PRESETS.keys()),
+        default=None,
+        help="Generator policy: pin|wifi|apple|max (implies --gen)",
+    )
     add_p.add_argument("--username", default=None, help="Username (with --gen)")
     add_p.add_argument("--url", default=None, help="URL (with --gen)")
     add_p.add_argument("--notes", default=None, help="Notes text")
@@ -1195,6 +1559,26 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("view").add_argument("name", nargs="?")
     sub.add_parser("edit").add_argument("name", nargs="?")
     sub.add_parser("delete").add_argument("name", nargs="?")
+
+    get_p = sub.add_parser(
+        "get",
+        help="Get or copy one field (password|username|totp|url) — scripting",
+    )
+    get_p.add_argument("name", nargs="?")
+    get_p.add_argument(
+        "--copy",
+        dest="copy_field",
+        choices=["password", "username", "totp", "url"],
+        default=None,
+        metavar="FIELD",
+        help="Copy FIELD to clipboard and exit (one-shot)",
+    )
+
+    touch_p = sub.add_parser(
+        "touch",
+        help="Mark password as rotated (refresh updated_at only)",
+    )
+    touch_p.add_argument("name", nargs="?")
 
     pin_p = sub.add_parser("pin", help="Pin entry as favorite")
     pin_p.add_argument("name", nargs="?")
@@ -1224,6 +1608,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--avoid-ambiguous", action="store_true")
     g.add_argument("--passphrase", action="store_true")
     g.add_argument("--words", type=int, default=5)
+    g.add_argument(
+        "--preset",
+        choices=sorted(GENERATOR_PRESETS.keys()),
+        default=None,
+        help="Named policy: pin (6 digits), wifi (16 easy), apple (20), max (64)",
+    )
 
     sub.add_parser("export")
     ec = sub.add_parser(
@@ -1232,6 +1622,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ec.add_argument("path", nargs="?", default=None, help="Output CSV path")
     ec.add_argument(
+        "--i-understand",
+        action="store_true",
+        help="Skip interactive YES confirmation (for scripts)",
+    )
+
+    ej = sub.add_parser(
+        "export-json",
+        help="Export vault as PLAINTEXT JSON (dangerous — requires confirmation)",
+    )
+    ej.add_argument("path", nargs="?", default=None, help="Output JSON path")
+    ej.add_argument(
         "--i-understand",
         action="store_true",
         help="Skip interactive YES confirmation (for scripts)",
@@ -1262,6 +1663,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("stats", help="Show vault statistics")
+
+    recent_p = sub.add_parser("recent", help="Show last accessed entries")
+    recent_p.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="How many entries to show (default 10)",
+    )
+
+    sub.add_parser(
+        "verify",
+        help="Recompute vault HMAC and report OK/fail (no entry listing)",
+    )
+    sub.add_parser(
+        "doctor",
+        help="Self-test: argon2, clipboard, path writable, crypto roundtrip",
+    )
 
     ic = sub.add_parser("import-csv", help="Import entries from CSV")
     ic.add_argument("file", help="Path to CSV file")
@@ -1295,13 +1713,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.clipboard_timeout is not None:
         set_clipboard_timeout(args.clipboard_timeout)
 
-    # Completions and gen don't need the vault
+    password_env = bool(getattr(args, "password_env", False))
+
+    # Completions / gen / doctor don't need vault unlock
     if args.command == "completions":
         return cmd_completions(args.shell)
 
+    if args.command == "doctor":
+        vault_path = default_vault_path(
+            vault_arg=getattr(args, "vault", None),
+            profile_arg=getattr(args, "profile", None),
+        )
+        return cmd_doctor(vault_path)
+
     if args.command == "gen":
         try:
-            if args.passphrase:
+            if getattr(args, "preset", None):
+                pw = generate_from_preset(args.preset)
+            elif args.passphrase:
                 pw = generate_passphrase(words=args.words)
             else:
                 pw = generate_password(
@@ -1315,12 +1744,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(pw)
         return 0
 
-    print(C.bold(C.cyan(f"=== Local Password Manager v{__version__} ===")))
-    if not CLIPBOARD_AVAILABLE:
-        print(C.dim("(install pyperclip for clipboard support)"))
-    if not ARGON2_AVAILABLE:
-        print(C.dim("(install argon2-cffi for stronger key derivation)"))
-    print()
+    # Quiet path for get --copy scripting
+    quiet_banner = args.command == "get" and getattr(args, "copy_field", None)
+
+    if not quiet_banner:
+        print(C.bold(C.cyan(f"=== Local Password Manager v{__version__} ===")))
+        if not CLIPBOARD_AVAILABLE:
+            print(C.dim("(install pyperclip for clipboard support)"))
+        if not ARGON2_AVAILABLE:
+            print(C.dim("(install argon2-cffi for stronger key derivation)"))
+        print()
 
     vault_path = default_vault_path(
         vault_arg=getattr(args, "vault", None),
@@ -1328,27 +1761,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     lock_timeout = args.lock_timeout if args.lock_timeout is not None else AUTOLOCK_SECONDS
     vault = Vault(vault_path, lock_timeout=lock_timeout)
-    if not unlock_or_create(vault):
+    if not unlock_or_create(vault, password_env=password_env, quiet=bool(quiet_banner)):
         return 1
 
+    exit_code = 0
     try:
         if args.command is None:
-            interactive(vault)
+            interactive(vault, password_env=password_env)
         elif args.command == "add":
             gen = bool(getattr(args, "gen", False))
-            non_interactive = gen or bool(getattr(args, "password", None))
+            preset = getattr(args, "preset", None)
+            password = getattr(args, "password", None)
+            if preset and not password:
+                gen = True
+                try:
+                    password = generate_from_preset(preset)
+                except ValueError as e:
+                    print(C.red(str(e)), file=sys.stderr)
+                    return 1
+                # length from preset already applied; still pass flags
+            non_interactive = gen or bool(password)
             cmd_add(
                 vault,
                 getattr(args, "name", None),
                 as_note=bool(getattr(args, "note", False)),
-                gen=gen,
+                gen=gen and not password,
                 length=int(getattr(args, "length", 20) or 20),
                 no_symbols=bool(getattr(args, "no_symbols", False)),
                 avoid_ambiguous=bool(getattr(args, "avoid_ambiguous", False)),
                 username=getattr(args, "username", None),
                 url=getattr(args, "url", None),
                 notes=getattr(args, "notes", None),
-                password=getattr(args, "password", None),
+                password=password,
                 non_interactive=non_interactive,
             )
         elif args.command == "add-note":
@@ -1361,6 +1805,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         elif args.command == "view":
             cmd_view(vault, getattr(args, "name", None))
+        elif args.command == "get":
+            exit_code = cmd_get(
+                vault,
+                getattr(args, "name", None),
+                copy_field=getattr(args, "copy_field", None),
+            )
+        elif args.command == "touch":
+            exit_code = cmd_touch(vault, getattr(args, "name", None))
         elif args.command == "edit":
             cmd_edit(vault, getattr(args, "name", None))
         elif args.command == "delete":
@@ -1384,6 +1836,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 path=getattr(args, "path", None),
                 i_understand=getattr(args, "i_understand", False),
             )
+        elif args.command == "export-json":
+            cmd_export_json(
+                vault,
+                path=getattr(args, "path", None),
+                i_understand=getattr(args, "i_understand", False),
+            )
         elif args.command == "import":
             cmd_import(vault)
         elif args.command == "master":
@@ -1400,6 +1858,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         elif args.command == "stats":
             cmd_stats(vault)
+        elif args.command == "recent":
+            cmd_recent(vault, limit=int(getattr(args, "limit", 10) or 10))
+        elif args.command == "verify":
+            exit_code = cmd_verify(vault)
         elif args.command == "import-csv":
             cmd_import_csv(
                 vault,
@@ -1410,5 +1872,5 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         vault.lock()
 
-    return 0
+    return exit_code
 

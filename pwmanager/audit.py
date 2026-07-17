@@ -6,15 +6,33 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, TYPE_CHECKING
+from urllib.parse import urlparse
 
 from pwmanager.colors import C
-from pwmanager.constants import OLD_PASSWORD_DAYS, WEAK_ENTROPY_BITS
+from pwmanager.constants import ROTATE_DEFAULT_DAYS, WEAK_ENTROPY_BITS
 from pwmanager.generators import password_entropy_bits
 from pwmanager.models import KIND_NOTE
 
 if TYPE_CHECKING:
     from pwmanager.hibp import HibpVaultReport
     from pwmanager.vault import Vault
+
+
+def extract_domain(url: str) -> str:
+    """Best-effort registrable host from a URL (or bare host)."""
+    if not url or not str(url).strip():
+        return ""
+    raw = str(url).strip()
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        host = urlparse(raw).hostname or ""
+    except Exception:
+        return ""
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
 
 
 @dataclass
@@ -27,6 +45,8 @@ class AuditReport:
     old: List[str] = field(default_factory=list)
     missing_totp: List[str] = field(default_factory=list)  # has url, no totp
     empty_usernames: List[str] = field(default_factory=list)
+    # Same username used on multiple different domains / sites
+    duplicate_username_groups: List[List[str]] = field(default_factory=list)
     hibp_breached: List[str] = field(default_factory=list)  # names only
     hibp_skipped: bool = False
     hibp_skip_reason: str = ""
@@ -38,6 +58,10 @@ class AuditReport:
         return sum(len(g) for g in self.reused_groups)
 
     @property
+    def duplicate_username_count(self) -> int:
+        return sum(len(g) for g in self.duplicate_username_groups)
+
+    @property
     def issue_count(self) -> int:
         return (
             self.reused_count
@@ -45,8 +69,21 @@ class AuditReport:
             + len(self.old)
             + len(self.missing_totp)
             + len(self.empty_usernames)
+            + self.duplicate_username_count
             + len(self.hibp_breached)
         )
+
+
+def _rotation_days_for(entry) -> int:
+    """Per-entry rotation window, falling back to global default."""
+    days = getattr(entry, "rotate_after_days", None)
+    if days is None:
+        return ROTATE_DEFAULT_DAYS
+    try:
+        d = int(days)
+        return d if d > 0 else ROTATE_DEFAULT_DAYS
+    except (TypeError, ValueError):
+        return ROTATE_DEFAULT_DAYS
 
 
 def audit_vault(
@@ -68,8 +105,9 @@ def audit_vault(
 
     # Reused passwords: group by password value, never expose the password itself
     by_pw: Dict[str, List[str]] = defaultdict(list)
+    # Username reuse across domains: username -> list of (name, domain)
+    by_user: Dict[str, List[tuple]] = defaultdict(list)
     now = time.time()
-    old_cutoff = OLD_PASSWORD_DAYS * 24 * 3600
 
     for name, entry in vault.entries.items():
         is_note = getattr(entry, "kind", "login") == KIND_NOTE
@@ -84,7 +122,9 @@ def audit_vault(
                 report.weak.append(name)
 
             updated = entry.updated_at or entry.created_at or 0
-            if updated == 0 or (now - updated) > old_cutoff:
+            rotate_days = _rotation_days_for(entry)
+            cutoff = rotate_days * 24 * 3600
+            if updated == 0 or (now - updated) > cutoff:
                 report.old.append(name)
         elif not is_note:
             # Empty password on a login entry is weak
@@ -96,14 +136,34 @@ def audit_vault(
         if not is_note and not (entry.username or "").strip():
             report.empty_usernames.append(name)
 
+        # Track non-empty usernames for cross-site reuse (domain-aware)
+        if not is_note:
+            uname = (entry.username or "").strip().lower()
+            if uname:
+                domain = extract_domain(entry.url) or f"(no-domain:{name})"
+                by_user[uname].append((name, domain))
+
     for names in by_pw.values():
         if len(names) > 1:
             report.reused_groups.append(sorted(names))
+
+    # Duplicate username across different sites/domains
+    for uname, pairs in by_user.items():
+        domains = {d for _, d in pairs}
+        names = sorted({n for n, _ in pairs})
+        if len(names) > 1 and len(domains) > 1:
+            # Same username on multiple distinct domains / sites
+            report.duplicate_username_groups.append(names)
+        elif len(names) > 1 and len(domains) == 1:
+            # Same username on multiple entries without distinguishing domains —
+            # still surface as a soft reuse signal when 2+ entries share it
+            report.duplicate_username_groups.append(names)
 
     report.weak.sort()
     report.old.sort()
     report.missing_totp.sort()
     report.empty_usernames.sort()
+    report.duplicate_username_groups.sort(key=lambda g: g[0] if g else "")
 
     if check_hibp:
         from pwmanager.hibp import check_vault_hibp
@@ -137,7 +197,7 @@ def compute_health_score(report: AuditReport) -> int:
     weak_ratio = len(report.weak) / n
     score -= weak_ratio * 30
 
-    # Old passwords
+    # Old / due-for-rotation passwords
     old_ratio = len(report.old) / n
     score -= old_ratio * 15
 
@@ -148,6 +208,10 @@ def compute_health_score(report: AuditReport) -> int:
     # Empty usernames
     empty_ratio = len(report.empty_usernames) / n
     score -= empty_ratio * 5
+
+    # Same username across sites (lighter than password reuse)
+    dup_ratio = report.duplicate_username_count / n
+    score -= dup_ratio * 5
 
     # HIBP breaches (severe when present)
     if report.hibp_breached:
@@ -209,10 +273,11 @@ def format_audit_report(report: AuditReport) -> str:
         f"Entropy below {int(WEAK_ENTROPY_BITS)} bits — consider regenerating.",
     )
     section(
-        "Old passwords",
+        "Rotation due (old passwords)",
         len(report.old),
         report.old,
-        f"Not updated in over {OLD_PASSWORD_DAYS} days (or never).",
+        f"Not updated within per-entry rotate_after_days "
+        f"(default {ROTATE_DEFAULT_DAYS} days). Use `touch NAME` after rotating.",
     )
     section(
         "Missing TOTP (hint)",
@@ -226,6 +291,25 @@ def format_audit_report(report: AuditReport) -> str:
         report.empty_usernames,
         "No username/email stored for these entries.",
     )
+
+    # Duplicate usernames across domains/sites
+    dup_n = report.duplicate_username_count
+    color = C.yellow if dup_n else C.green
+    lines.append(
+        f"{C.bold('Duplicate usernames (across sites)')}: {color(str(dup_n))} entries"
+    )
+    if report.duplicate_username_groups:
+        lines.append(
+            C.dim(
+                "  Same username/email used on multiple entries/domains "
+                "(credential-stuffing risk if one site leaks):"
+            )
+        )
+        for group in report.duplicate_username_groups:
+            lines.append(f"  • {', '.join(group)}")
+    else:
+        lines.append(C.dim("  (none)"))
+    lines.append("")
 
     # Optional HIBP section
     if report.hibp_skipped:

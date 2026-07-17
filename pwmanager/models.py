@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # Entry kinds
 KIND_LOGIN = "login"
@@ -25,6 +25,9 @@ class Entry:
     updated_at: float = field(default_factory=time.time)
     favorite: bool = False
     kind: str = KIND_LOGIN  # "login" | "note"
+    # None = use global default (ROTATE_DEFAULT_DAYS) for rotation audit
+    rotate_after_days: Optional[int] = None
+    last_accessed: float = 0.0  # 0 = never accessed via view/get/copy
 
     def is_note(self) -> bool:
         return self.kind == KIND_NOTE
@@ -37,6 +40,12 @@ class Entry:
         kind = d.get("kind", KIND_LOGIN) or KIND_LOGIN
         if kind not in VALID_KINDS:
             kind = KIND_LOGIN
+        rotate = d.get("rotate_after_days", None)
+        if rotate is not None:
+            try:
+                rotate = int(rotate)
+            except (TypeError, ValueError):
+                rotate = None
         return cls(
             username=d.get("username", ""),
             password=d.get("password", ""),
@@ -49,4 +58,6 @@ class Entry:
             updated_at=d.get("updated_at", time.time()),
             favorite=bool(d.get("favorite", False)),
             kind=kind,
+            rotate_after_days=rotate,
+            last_accessed=float(d.get("last_accessed", 0) or 0),
         )

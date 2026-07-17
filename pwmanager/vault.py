@@ -145,6 +145,63 @@ class Vault:
         self.entries[name].updated_at = time.time()
         self.save()
 
+    def touch_entry(self, name: str) -> None:
+        """Mark entry as rotated: update ``updated_at`` without changing password."""
+        if name not in self.entries:
+            raise KeyError(name)
+        self.entries[name].updated_at = time.time()
+        self.save()
+
+    def mark_accessed(self, name: str) -> None:
+        """Record last_accessed for recent list (view / get / copy)."""
+        if name not in self.entries:
+            raise KeyError(name)
+        self.entries[name].last_accessed = time.time()
+        self.save()
+
+    def recent(self, limit: int = 10) -> List[str]:
+        """Return entry names ordered by last_accessed descending (accessed only)."""
+        accessed = [
+            (n, e.last_accessed)
+            for n, e in self.entries.items()
+            if (e.last_accessed or 0) > 0
+        ]
+        accessed.sort(key=lambda t: (-t[1], t[0].lower()))
+        return [n for n, _ in accessed[: max(0, int(limit))]]
+
+    def verify_integrity(self) -> Tuple[bool, str]:
+        """Recompute file HMAC and report OK/fail. Does not list entries.
+
+        Requires an unlocked vault (key present). Returns (ok, message).
+        """
+        if self.key is None:
+            return False, "Vault is locked"
+        if not self.exists():
+            return False, f"Vault file not found: {self.path}"
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Cannot read vault: {e}"
+
+        if "hmac" not in payload:
+            return False, "Vault has no HMAC field (legacy or incomplete file)"
+        if "salt" not in payload or "vault" not in payload:
+            return False, "Vault missing salt or ciphertext"
+
+        expected = file_hmac(payload, self.key)
+        stored = payload["hmac"]
+        if not hmac.compare_digest(expected, stored):
+            return False, "HMAC mismatch — vault may be tampered or key wrong"
+
+        # Also confirm ciphertext still decrypts with current key
+        try:
+            decrypt_bytes(payload["vault"].encode("ascii"), self.key)
+        except InvalidToken:
+            return False, "Ciphertext failed to decrypt"
+
+        return True, "OK — integrity verified"
+
     def favorites(self) -> List[str]:
         return sorted(n for n, e in self.entries.items() if e.favorite)
 
@@ -290,6 +347,23 @@ class Vault:
                 )
                 count += 1
         return count
+
+    def export_json(self, out_path: str) -> int:
+        """Export all entries as plaintext JSON. Returns number of entries written.
+
+        WARNING: output is unencrypted (passwords, TOTP secrets in cleartext).
+        Caller must obtain explicit confirmation (e.g. --i-understand).
+        """
+        payload: Dict[str, Any] = {
+            "exported_at": time.time(),
+            "version": VAULT_VERSION,
+            "entries": {},
+        }
+        for name in self.sorted_entry_names():
+            payload["entries"][name] = self.entries[name].to_dict()
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return len(payload["entries"])
 
     def stats(self) -> Dict[str, Any]:
         """Aggregate vault statistics for the `stats` command."""

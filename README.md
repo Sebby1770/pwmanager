@@ -1,28 +1,30 @@
-# pwmanager 2.2
+# pwmanager 2.3
 
-Local encrypted password manager with TOTP watch, HIBP breach checks, secure notes, vault profiles, favorites, fuzzy search, CSV import/export, and a colorized CLI. No cloud, no accounts — your vault stays on your machine.
+Local encrypted password manager with TOTP watch, HIBP breach checks, rotation reminders, secure notes, vault profiles, favorites, fuzzy search, CSV/JSON import/export, `get --copy` scripting, `doctor` self-test, and a colorized CLI. No cloud, no accounts — your vault stays on your machine.
 
 ## Highlights
 
 - **Strong KDF** — Argon2id by default (PBKDF2-HMAC-SHA256 fallback)
 - **Authenticated encryption** — Fernet (AES-128-CBC + HMAC-SHA256) plus file-level HMAC
-- **TOTP / 2FA** — store base32 secrets, live RFC 6238 codes, `totp NAME --watch`, otpauth URI box (+ optional `qrcode` / `qrencode`)
-- **HIBP k-anonymity** — optional `audit --hibp` checks passwords without sending them (only SHA-1 prefix)
-- **Secure notes** — `add-note` / `add --note` for note-first entries (`kind: note`)
-- **Password history** — `history NAME` lists previous passwords; restore with confirmation
+- **Rotation reminders** — per-entry `rotate_after_days` (default 90); `touch NAME` after you rotate
+- **get / clipboard one-shot** — `get NAME --copy password|username|totp|url` for scripts
+- **Integrity verify** — `verify` recomputes HMAC without listing secrets
+- **doctor** — self-test (Argon2, clipboard, path, crypto + vault roundtrip)
+- **Generator presets** — `gen --preset pin|wifi|apple|max`
+- **Recent access** — `recent` shows last 10 viewed/copied entries
+- **TOTP / 2FA** — store base32 secrets, live RFC 6238 codes, `totp NAME --watch`
+- **HIBP k-anonymity** — optional `audit --hibp` (SHA-1 prefix only)
+- **Secure notes** — `add-note` / `add --note` (`kind: note`)
+- **Password history** — `history NAME` list / restore previous passwords
 - **Vault profiles** — `pwmanager --profile work` or `PWMANAGER_PROFILE=work`
-- **Generate-on-add** — `add NAME --gen --length 20` non-interactive password generation
-- **Fuzzy search** — exact substring matches plus ranked fuzzy suggestions
-- **Favorites / pin** — pin important entries; listed first in view and search
-- **Security audit** — reused / weak / old passwords, missing TOTP hints, empty usernames, optional HIBP
-- **Vault stats** — entry counts, logins vs notes, tags, TOTP coverage, health score
-- **CSV import** — Bitwarden, Chrome, and generic layouts with added/skipped/updated summary
-- **Plain CSV export** — gated with YES / `--i-understand` (plaintext warning)
-- **Password generator** — random passwords and diceware-style passphrases (1000+ word list)
-- **Clipboard auto-clear** — optional copy with wipe; `--clipboard-timeout`
-- **Auto-lock** — idle lock; `--lock-timeout` / default 5 minutes
-- **Shell completions** — `pwmanager completions bash|zsh`
+- **Fuzzy search** — exact matches plus ranked suggestions
+- **Favorites / pin** — pin important entries
+- **Security audit** — reused / weak / due-for-rotation passwords, duplicate usernames across domains, missing TOTP, empty usernames, optional HIBP
+- **Plain CSV / JSON export** — gated with YES / `--i-understand` (plaintext warning)
 - **Encrypted export / import** — backups and machine moves
+- **Clipboard auto-clear** — optional copy with wipe; `--clipboard-timeout`
+- **Auto-lock** — idle lock clears screen; `--lock-timeout` (default 5 minutes)
+- **Shell completions** — `pwmanager completions bash|zsh`
 
 ## Install
 
@@ -57,52 +59,34 @@ python pwmanager.py
 pwmanager
 ```
 
-First run creates a master password (min 10 characters, strength check). Later runs unlock the vault. Menu:
-
-```
-1  add         add entry
-2  view        view / list entries (favorites first, notes tagged)
-3  search      search (exact + fuzzy)
-4  edit        edit entry
-5  delete      delete entry
-6  generate    password or passphrase
-7  export      encrypted backup
-8  import      restore from backup
-9  master      change master password
-a  audit       security audit & health score
-h  hibp        audit + HIBP breach check (network)
-n  add-note    add secure note
-y  history     password history browser
-t  totp        show / watch TOTP code
-c  import-csv  import from Bitwarden/Chrome CSV
-e  export-csv  plaintext CSV export (dangerous)
-p  pin         pin as favorite
-u  unpin       remove favorite
-s  stats       vault statistics
-l  lock        lock vault
-q  quit
-```
-
-The interactive menu shows your **password health score** (0–100) derived from audit findings.
+First run creates a master password (min 10 characters, strength check). Later runs unlock the vault. Menu includes add/view/search/edit, audit, TOTP, notes, recent, touch, verify, doctor, and export options. Idle auto-lock **clears the screen** before re-prompting.
 
 ### One-shot commands
 
 ```bash
 python -m pwmanager add github
 python -m pwmanager add github --gen --length 20 --username me@ex.com
+python -m pwmanager add wifi --gen --preset wifi
 python -m pwmanager add-note wifi --notes "SSID guest / pass …"
-python -m pwmanager add memo --note --notes "secret text"
 python -m pwmanager view github
+python -m pwmanager get github --copy password
+python -m pwmanager get github --copy username
+python -m pwmanager touch github          # mark rotated (updates updated_at only)
+python -m pwmanager recent
+python -m pwmanager verify
+python -m pwmanager doctor
 python -m pwmanager search api --tag work
 python -m pwmanager history github
-python -m pwmanager totp github
 python -m pwmanager totp github --watch
 python -m pwmanager audit
 python -m pwmanager audit --hibp
 python -m pwmanager stats
 python -m pwmanager import-csv export.csv --format auto --on-conflict skip
 python -m pwmanager export-csv backup.csv --i-understand
+python -m pwmanager export-json backup.json --i-understand
 python -m pwmanager gen --length 32
+python -m pwmanager gen --preset wifi
+python -m pwmanager gen --preset pin
 python -m pwmanager --vault /path/to/other.json view
 python -m pwmanager --profile work stats
 PWMANAGER_PROFILE=work python -m pwmanager
@@ -111,109 +95,118 @@ python -m pwmanager completions bash
 python -m pwmanager --version
 ```
 
+### get — scripting / clipboard one-shot
+
+```bash
+# Copy password to clipboard and exit (stderr status; password not printed)
+python -m pwmanager get github --copy password
+
+# Print password to stdout (pipeline-friendly; be careful with shell history)
+python -m pwmanager get github
+```
+
+Fields: `password`, `username`, `totp`, `url`. Viewing or copying updates `last_accessed` for `recent`.
+
+### Automation unlock (`--password-env`) — insecure opt-in
+
+By default the master password is **always prompted**. For CI/tests or tightly controlled automation only:
+
+```bash
+# Explicit flag required — do NOT set this habitually
+export PWMANAGER_PASSWORD='…'   # process env is visible to other users/tools
+python -m pwmanager --password-env --vault /tmp/test.vault.json verify
+unset PWMANAGER_PASSWORD
+```
+
+**Never** document or store production master passwords in shell profiles, Docker Compose files, or CI secrets that end up in logs. Prefer interactive prompt or OS keychain wrappers outside this tool. See [SECURITY.md](SECURITY.md).
+
+### Rotation reminders
+
+- Default rotation window: **90 days** (`ROTATE_DEFAULT_DAYS`).
+- Override per entry via `rotate_after_days` (stored on the entry; `None` = use default).
+- Audit flags entries whose `updated_at` is older than their window.
+- After you change a password elsewhere (or confirm it is still good), run:
+
+```bash
+python -m pwmanager touch github
+```
+
+### Generator presets
+
+| Preset | Length | Notes |
+|--------|--------|--------|
+| `pin` | 6 | Digits only |
+| `wifi` | 16 | Upper+lower+digits, no symbols, no ambiguous chars |
+| `apple` | 20 | Strong mixed, no ambiguous |
+| `max` | 64 | Full character classes |
+
+```bash
+python -m pwmanager gen --preset wifi
+```
+
+### Integrity verify
+
+```bash
+python -m pwmanager verify
+```
+
+Unlocks, recomputes the file HMAC, confirms ciphertext decrypts, prints **OK** or **FAIL** — does not list entries.
+
+### doctor
+
+```bash
+python -m pwmanager doctor
+```
+
+Checks Argon2 availability (warn), clipboard (warn), vault parent directory writable, crypto roundtrip, and a temporary vault create/unlock/HMAC path. Exit `0` if critical checks pass.
+
 ### HIBP breach check (optional network)
 
 ```bash
 python -m pwmanager audit --hibp
 ```
 
-Uses the [Have I Been Pwned](https://haveibeenpwned.com/API/v3#PwnedPasswords) **k-anonymity** range API:
+Uses the [Have I Been Pwned](https://haveibeenpwned.com/API/v3#PwnedPasswords) **k-anonymity** range API (only first 5 hex chars of SHA-1). Full password never leaves the machine. Offline → skipped, not a hard failure. See [SECURITY.md](SECURITY.md).
 
-1. Password is hashed with **SHA-1** locally.
-2. Only the **first 5 hex characters** of the hash are sent to `api.pwnedpasswords.com`.
-3. The full password and full hash **never** leave your machine.
-4. Matching is done locally against the returned suffix list.
-5. If offline, the report says **skipped (network unavailable)** — audit continues without failing hard.
-
-Reports breached **entry names only** (never prints passwords). See [SECURITY.md](SECURITY.md).
-
-### Secure notes
+### Plaintext CSV / JSON export (dangerous)
 
 ```bash
-python -m pwmanager add-note passport
-python -m pwmanager add ideas --note
+python -m pwmanager export-csv vault_export.csv --i-understand
+python -m pwmanager export-json vault_export.json --i-understand
 ```
 
-Notes use `kind: "note"`. Username/password are optional; the **notes** field is primary. Listed with a `[note]` tag in view/search.
+Both write **passwords and TOTP secrets in cleartext**. Prefer encrypted `export` for backups. Delete plaintext files when finished. JSON shape:
 
-### Password history
-
-```bash
-python -m pwmanager history github
+```json
+{
+  "exported_at": 0.0,
+  "version": 2,
+  "entries": {
+    "name": { "username": "…", "password": "…", "…": "…" }
+  }
+}
 ```
 
-Shows previous passwords (from `entry.history`) with timestamps. Optionally restore one with confirmation (current password is pushed into history first).
-
-### Live TOTP
-
-```bash
-python -m pwmanager totp github          # code + seconds left + progress bar + otpauth URI
-python -m pwmanager totp github --watch  # refreshes every second until Ctrl+C
-```
-
-The otpauth URI can be turned into a QR with `qrencode` or the optional Python `qrcode` package if installed.
-
-### Vault profiles
-
-```bash
-# Loads ~/.config/pwmanager/work.vault.json
-python -m pwmanager --profile work
-
-# Or via environment
-export PWMANAGER_PROFILE=work
-python -m pwmanager
-
-# Optional path map: ~/.config/pwmanager/profiles.json
-# { "work": "/secure/work.vault.json", "personal": "~/vaults/personal.json" }
-```
-
-Resolution order:
-
-1. `--vault PATH`
-2. `--profile NAME` or `PWMANAGER_PROFILE`
-3. `PWMANAGER_VAULT`
-4. `./vault.json` (cwd default)
-
-### Security audit
+## Security audit
 
 ```bash
 python -m pwmanager audit
 python -m pwmanager audit --hibp
 ```
 
-Reports (never prints actual passwords):
-
 | Check | Description |
 |-------|-------------|
 | Reused passwords | Same password on multiple entries |
 | Weak passwords | Estimated entropy &lt; 50 bits |
-| Old passwords | Not updated in &gt; 365 days (or never) |
+| Rotation due | Not updated within `rotate_after_days` (default 90) |
 | Missing TOTP | Has a URL but no TOTP secret (hint) |
 | Empty usernames | No username/email on login entries |
+| Duplicate usernames | Same username across different domains/sites |
 | HIBP breached | Optional: password seen in known breaches |
-
-### CSV import
-
-```bash
-python -m pwmanager import-csv file.csv --format auto|bitwarden|chrome|generic
-python -m pwmanager import-csv file.csv --on-conflict skip|overwrite
-```
-
-After import, prints a summary: **N added, M overwritten, K skipped**.
-
-### Plaintext CSV export (dangerous)
-
-```bash
-python -m pwmanager export-csv vault_export.csv --i-understand
-```
-
-Columns: `name`, `username`, `password`, `url`, `notes`, `tags`, `totp_secret`, `favorite`, `kind`.
-
-**This file is unencrypted.** Prefer encrypted export for backups. Delete the CSV when finished.
 
 ## Vault format
 
-Default path: `vault.json` in the current working directory (or profile path above).
+Default path: `vault.json` in the current working directory (or profile path).
 
 ```json
 {
@@ -225,23 +218,28 @@ Default path: `vault.json` in the current working directory (or profile path abo
 }
 ```
 
-Fully compatible with earlier vaults. Entry fields: `username`, `password`, `url`, `notes`, `tags`, `totp_secret`, `history`, `created_at`, `updated_at`, `favorite`, `kind` (`login` | `note`, default `login`).
+**Backward compatible** with earlier vaults. New entry fields default when missing:
+
+- `rotate_after_days` — `null` → use global 90-day default
+- `last_accessed` — `0` → never accessed via view/get/copy
+
+Other fields: `username`, `password`, `url`, `notes`, `tags`, `totp_secret`, `history`, `created_at`, `updated_at`, `favorite`, `kind` (`login` \| `note`).
 
 ## Package layout
 
 ```
 pwmanager/
-  __init__.py      # version 2.2.0
+  __init__.py      # version 2.3.0
   __main__.py
   crypto.py
-  generators.py
+  generators.py    # presets: pin|wifi|apple|max
   data/eff_short.txt
-  totp.py          # RFC 6238, watch mode, otpauth box
-  models.py        # Entry (login | note)
-  vault.py
-  audit.py
-  hibp.py          # HIBP k-anonymity client
-  profiles.py      # multi-vault profiles
+  totp.py
+  models.py        # Entry + rotate_after_days, last_accessed
+  vault.py         # touch, recent, verify, export_json
+  audit.py         # rotation + domain-aware username reuse
+  hibp.py
+  profiles.py
   importers.py
   cli.py
   colors.py
@@ -260,9 +258,10 @@ CI runs pytest on Ubuntu with Python 3.11 and 3.12.
 ## Security notes
 
 - The master password is **never** stored. Forget it and the vault is unrecoverable.
-- HIBP is **optional** and uses k-anonymity (hash prefix only). See SECURITY.md.
+- **Do not** use `--password-env` / `PWMANAGER_PASSWORD` for production secrets.
+- **Do not** commit `vault.json`, plaintext CSV/JSON exports, or real credentials.
+- HIBP is optional and uses k-anonymity (hash prefix only). See SECURITY.md.
 - Argon2id: time=3, memory=64 MiB, parallelism=4. PBKDF2 fallback: 600,000 iterations.
-- **Never** commit vault files or plaintext CSV exports to git.
 - See [SECURITY.md](SECURITY.md) for the full threat model.
 - This is a learning/hobby tool. For high-stakes use, prefer Bitwarden / 1Password / KeePassXC.
 

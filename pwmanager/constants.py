@@ -27,4 +27,7 @@ SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?/"
 
 # Audit thresholds
 WEAK_ENTROPY_BITS = 50.0
-OLD_PASSWORD_DAYS = 365
+# Default rotation window when Entry.rotate_after_days is None (v2.3+)
+ROTATE_DEFAULT_DAYS = 90
+# Alias kept for older imports / docs
+OLD_PASSWORD_DAYS = ROTATE_DEFAULT_DAYS

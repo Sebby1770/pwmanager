@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 HIBP_RANGE_URL = "https://api.pwnedpasswords.com/range/{prefix}"
 DEFAULT_TIMEOUT = 5.0
-USER_AGENT = "pwmanager-local-hibp-check/2.2"
+USER_AGENT = "pwmanager-local-hibp-check/2.3"
 
 
 @dataclass
