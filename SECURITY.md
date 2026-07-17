@@ -2,7 +2,7 @@
 
 ## Threat model
 
-**pwmanager** is a **local, offline** password manager. It is designed to protect
+**pwmanager** is a **local, offline-first** password manager. It is designed to protect
 stored credentials against:
 
 - Casual inspection of the vault file on disk
@@ -30,6 +30,7 @@ such as Bitwarden, 1Password, or KeePassXC.
 | Small personal credential sets | Shared team vaults |
 | Air-gapped or single-machine use | Sync across untrusted devices |
 | Generating strong passwords & TOTP | Storing files/attachments |
+| Optional HIBP check when online | Relying on breach checks offline |
 
 ## Cryptography
 
@@ -65,20 +66,57 @@ Derived key is urlsafe-base64-encoded for Fernet.
 
 Entry fields (inside the encrypted payload): `username`, `password`, `url`,
 `notes`, `tags`, `totp_secret`, `history`, `created_at`, `updated_at`,
-`favorite` (optional, default false).
+`favorite` (optional, default false), `kind` (`login` | `note`, default `login`).
+
+## Have I Been Pwned (HIBP) — optional network feature
+
+`pwmanager audit --hibp` (or interactive **h**) can check whether stored
+passwords appear in known breach corpora using the HIBP **Pwned Passwords**
+range API ([k-anonymity model](https://haveibeenpwned.com/API/v3#PwnedPasswords)).
+
+### What is sent
+
+| Sent | Not sent |
+|------|----------|
+| First **5 hex characters** of `SHA-1(password)` | The password itself |
+| | The remaining hash suffix |
+| | Entry names, usernames, or vault paths |
+| | Master password |
+
+### How it works
+
+1. Locally compute `SHA-1` of the password (UTF-8).
+2. HTTP GET `https://api.pwnedpasswords.com/range/{prefix}` with only the 5-char prefix.
+3. Compare the local hash **suffix** against the returned list of `SUFFIX:COUNT` lines.
+4. Report **entry names** that match (never print the password or full hash).
+
+### Offline / failure behavior
+
+If the network is unavailable, DNS fails, or the request times out, the audit
+reports **skipped (network unavailable)** and continues. HIBP is never required
+for normal vault use.
+
+### Privacy considerations
+
+- This is the only **optional outbound network** call in pwmanager.
+- Do not use `--hibp` on a hostile network if you are concerned about traffic
+  analysis of hash prefixes (theoretical risk; prefixes alone do not reveal passwords).
+- Prefer running HIBP checks on a trusted connection.
 
 ## Operational recommendations
 
 1. **Master password** — long passphrase (≥ 5 random words) or ≥ 16 chars with high entropy. There is **no recovery**.
 2. **Install Argon2** — `pip install "pwmanager[full]"` so Argon2id is used.
-3. **Permissions** — keep `vault.json` on an encrypted volume; restrict file mode (`chmod 600 vault.json`).
+3. **Permissions** — keep vault files on an encrypted volume; restrict file mode (`chmod 600`).
 4. **Backups** — use **encrypted** export; never commit vault files to git (see `.gitignore`).
 5. **Plaintext CSV export** — `export-csv` writes passwords and TOTP secrets in cleartext. Require typing `YES` or `--i-understand`. Treat the file as highly sensitive and delete it when finished.
 6. **Clipboard** — auto-clear (`--clipboard-timeout`) reduces exposure; still avoid copying secrets on shared machines.
 7. **Auto-lock** — idle lock (default 5 minutes, `--lock-timeout`) helps; lock manually when stepping away.
 8. **Updates** — keep `cryptography` and Python patched.
-9. **Audit / stats** — run `pwmanager audit` and `pwmanager stats` regularly; fix reused and weak passwords first.
-10. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
+9. **Audit / stats / HIBP** — run `pwmanager audit` regularly; use `--hibp` when online; fix reused, weak, and breached passwords first.
+10. **Profiles** — keep separate vaults for work/personal under `~/.config/pwmanager/`; do not sync vaults via unencrypted cloud folders.
+11. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
+12. **History / TOTP watch** — history browser shows previous passwords only while the vault is unlocked; live TOTP is terminal-only.
 
 ## Reporting issues
 

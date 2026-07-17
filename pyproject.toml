@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwmanager"
-version = "2.1.0"
-description = "Local encrypted password manager with TOTP, audit, favorites, and CSV export"
+version = "2.2.0"
+description = "Local encrypted password manager with TOTP, HIBP audit, notes, profiles, and CSV export"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"

@@ -1,3 +1,3 @@
-"""Local encrypted password manager with TOTP, audit, and CSV import."""
+"""Local encrypted password manager with TOTP, audit, HIBP, and CSV import."""
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
