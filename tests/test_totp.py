@@ -7,7 +7,16 @@ import time
 
 import pytest
 
-from pwmanager.totp import totp_at, totp_now, totp_seconds_remaining, totp_uri
+from pwmanager.totp import (
+    format_totp_code_spaced,
+    format_totp_line,
+    progress_bar,
+    totp_at,
+    totp_now,
+    totp_seconds_remaining,
+    totp_uri,
+    watch_totp,
+)
 
 
 # RFC 6238 Appendix B uses ASCII secret "12345678901234567890" with SHA-1.
@@ -84,3 +93,63 @@ def test_totp_uri_encodes_special_chars():
 def test_totp_uri_empty_secret_raises():
     with pytest.raises(ValueError, match="empty"):
         totp_uri("", "name")
+
+
+def test_totp_seconds_remaining_injectable_now():
+    # 90.0 % 30 == 0 → full period remaining
+    assert totp_seconds_remaining(period=30, now=90.0) == 30
+    # 95.0 % 30 == 5 → 25 left
+    assert totp_seconds_remaining(period=30, now=95.0) == 25
+    # 119.0 % 30 == 29 → 1 left
+    assert totp_seconds_remaining(period=30, now=119.0) == 1
+
+
+def test_format_totp_code_spaced():
+    assert format_totp_code_spaced("123456") == "123 456"
+    assert format_totp_code_spaced("12") == "12"
+
+
+def test_progress_bar_bounds():
+    bar_full = progress_bar(30, period=30, width=10)
+    assert bar_full == "[" + "#" * 10 + "]"
+    bar_empty = progress_bar(0, period=30, width=10)
+    assert bar_empty == "[" + "-" * 10 + "]"
+    mid = progress_bar(15, period=30, width=10)
+    assert mid.startswith("[") and mid.endswith("]")
+    assert len(mid) == 12  # brackets + width
+
+
+def test_format_totp_line_contains_code_and_bar():
+    line = format_totp_line("123456", 12, period=30)
+    assert "123 456" in line
+    assert "12s" in line
+    assert "#" in line or "-" in line
+
+
+def test_watch_totp_limited_iterations():
+    """watch_totp is unit-testable via injected clock/sleep/write."""
+    lines: list[str] = []
+    ticks = {"t": 1000.0}
+
+    def now():
+        return ticks["t"]
+
+    def sleep(_s):
+        ticks["t"] += 1.0
+
+    def write(s):
+        lines.append(s)
+
+    watch_totp(
+        RFC_SECRET_B32,
+        period=30,
+        digits=6,
+        iterations=3,
+        sleep_fn=sleep,
+        now_fn=now,
+        write_fn=write,
+    )
+    # At least one display line with carriage return
+    joined = "".join(lines)
+    assert "\r" in joined or any("\r" in x for x in lines)
+    assert len(lines) >= 3

@@ -5,14 +5,15 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from pwmanager.colors import C
 from pwmanager.constants import OLD_PASSWORD_DAYS, WEAK_ENTROPY_BITS
 from pwmanager.generators import password_entropy_bits
+from pwmanager.models import KIND_NOTE
 
 if TYPE_CHECKING:
-    from pwmanager.models import Entry
+    from pwmanager.hibp import HibpVaultReport
     from pwmanager.vault import Vault
 
 
@@ -26,6 +27,10 @@ class AuditReport:
     old: List[str] = field(default_factory=list)
     missing_totp: List[str] = field(default_factory=list)  # has url, no totp
     empty_usernames: List[str] = field(default_factory=list)
+    hibp_breached: List[str] = field(default_factory=list)  # names only
+    hibp_skipped: bool = False
+    hibp_skip_reason: str = ""
+    hibp_checked: int = 0
     health_score: int = 100
 
     @property
@@ -40,11 +45,22 @@ class AuditReport:
             + len(self.old)
             + len(self.missing_totp)
             + len(self.empty_usernames)
+            + len(self.hibp_breached)
         )
 
 
-def audit_vault(vault: "Vault") -> AuditReport:
-    """Analyze an unlocked vault for common security issues."""
+def audit_vault(
+    vault: "Vault",
+    *,
+    check_hibp: bool = False,
+    hibp_timeout: float = 5.0,
+    hibp_opener: Optional[object] = None,
+) -> AuditReport:
+    """Analyze an unlocked vault for common security issues.
+
+    If ``check_hibp`` is True, also run optional Have I Been Pwned k-anonymity
+    checks (network). Offline results are reported as skipped, not failures.
+    """
     report = AuditReport(total_entries=len(vault.entries))
     if not vault.entries:
         report.health_score = 100
@@ -56,22 +72,28 @@ def audit_vault(vault: "Vault") -> AuditReport:
     old_cutoff = OLD_PASSWORD_DAYS * 24 * 3600
 
     for name, entry in vault.entries.items():
+        is_note = getattr(entry, "kind", "login") == KIND_NOTE
+
         if entry.password:
             by_pw[entry.password].append(name)
 
-        bits = password_entropy_bits(entry.password)
-        if bits < WEAK_ENTROPY_BITS:
+        # Notes without passwords skip weak/old password checks
+        if entry.password:
+            bits = password_entropy_bits(entry.password)
+            if bits < WEAK_ENTROPY_BITS:
+                report.weak.append(name)
+
+            updated = entry.updated_at or entry.created_at or 0
+            if updated == 0 or (now - updated) > old_cutoff:
+                report.old.append(name)
+        elif not is_note:
+            # Empty password on a login entry is weak
             report.weak.append(name)
 
-        # Old: no update timestamp treated as old, or updated_at > 365 days
-        updated = entry.updated_at or entry.created_at or 0
-        if updated == 0 or (now - updated) > old_cutoff:
-            report.old.append(name)
-
-        if entry.url and not entry.totp_secret:
+        if entry.url and not entry.totp_secret and not is_note:
             report.missing_totp.append(name)
 
-        if not (entry.username or "").strip():
+        if not is_note and not (entry.username or "").strip():
             report.empty_usernames.append(name)
 
     for names in by_pw.values():
@@ -82,6 +104,18 @@ def audit_vault(vault: "Vault") -> AuditReport:
     report.old.sort()
     report.missing_totp.sort()
     report.empty_usernames.sort()
+
+    if check_hibp:
+        from pwmanager.hibp import check_vault_hibp
+
+        hibp: "HibpVaultReport" = check_vault_hibp(
+            vault, timeout=hibp_timeout, opener=hibp_opener
+        )
+        report.hibp_breached = list(hibp.breached_names)
+        report.hibp_skipped = hibp.skipped
+        report.hibp_skip_reason = hibp.skip_reason
+        report.hibp_checked = hibp.checked
+
     report.health_score = compute_health_score(report)
     return report
 
@@ -114,6 +148,11 @@ def compute_health_score(report: AuditReport) -> int:
     # Empty usernames
     empty_ratio = len(report.empty_usernames) / n
     score -= empty_ratio * 5
+
+    # HIBP breaches (severe when present)
+    if report.hibp_breached:
+        hibp_ratio = len(report.hibp_breached) / n
+        score -= hibp_ratio * 35
 
     return max(0, min(100, int(round(score))))
 
@@ -188,9 +227,27 @@ def format_audit_report(report: AuditReport) -> str:
         "No username/email stored for these entries.",
     )
 
-    if report.issue_count == 0:
+    # Optional HIBP section
+    if report.hibp_skipped:
+        lines.append(
+            f"{C.bold('HIBP breach check')}: "
+            f"{C.yellow('skipped (network unavailable)')}"
+        )
+        if report.hibp_skip_reason:
+            lines.append(C.dim(f"  {report.hibp_skip_reason}"))
+        lines.append("")
+    elif report.hibp_checked or report.hibp_breached:
+        section(
+            "HIBP breached passwords",
+            len(report.hibp_breached),
+            report.hibp_breached,
+            "Password appears in Have I Been Pwned breaches — change it. "
+            "(Only SHA-1 prefix was sent; full password never left this machine.)",
+        )
+
+    if report.issue_count == 0 and not report.hibp_skipped:
         lines.append(C.green("No issues found. Vault looks healthy."))
-    else:
+    elif report.issue_count > 0:
         lines.append(
             C.yellow(
                 f"Found {report.issue_count} issue(s). Review and fix when you can."

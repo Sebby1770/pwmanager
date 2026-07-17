@@ -21,7 +21,6 @@ from pwmanager.colors import C
 from pwmanager.constants import (
     AUTOLOCK_SECONDS,
     CLIPBOARD_CLEAR_SECONDS,
-    DEFAULT_VAULT_PATH,
     MAX_UNLOCK_ATTEMPTS,
 )
 from pwmanager.crypto import ARGON2_AVAILABLE, decrypt_bytes, derive_key
@@ -32,8 +31,17 @@ from pwmanager.generators import (
     strength_label,
 )
 from pwmanager.importers import import_csv_file, merge_entries
-from pwmanager.models import Entry
-from pwmanager.totp import totp_now, totp_seconds_remaining, totp_uri
+from pwmanager.models import KIND_NOTE, Entry
+from pwmanager.profiles import resolve_vault_path
+from pwmanager.totp import (
+    format_otpauth_box,
+    format_totp_line,
+    totp_now,
+    totp_seconds_remaining,
+    totp_uri,
+    try_print_qr,
+    watch_totp,
+)
 from pwmanager.vault import Vault
 
 try:
@@ -131,22 +139,40 @@ def prompt_int(text: str, default: int) -> int:
 def print_entry(name: str, e: Entry, show_password: bool = True) -> None:
     print()
     star = C.yellow("★ ") if e.favorite else ""
-    print(C.bold(C.cyan(f"  {star}{name}")))
-    print(f"  {C.dim('Username:')} {e.username}")
-    if show_password:
-        bits = password_entropy_bits(e.password)
-        print(
-            f"  {C.dim('Password:')} {e.password}  "
-            f"{C.dim(f'({bits:.0f} bits — {strength_label(bits)})')}"
-        )
+    kind_tag = C.dim(" [note]") if e.is_note() else ""
+    print(C.bold(C.cyan(f"  {star}{name}{kind_tag}")))
+    if e.is_note():
+        print(f"  {C.dim('Kind:    ')} note")
+        if e.notes:
+            print(f"  {C.dim('Notes:   ')}")
+            for line in e.notes.splitlines() or [e.notes]:
+                print(f"    {line}")
+        else:
+            print(f"  {C.dim('Notes:   ')} {C.dim('(empty)')}")
+        if e.username:
+            print(f"  {C.dim('Username:')} {e.username}")
+        if e.password and show_password:
+            print(f"  {C.dim('Password:')} {e.password}")
+        elif e.password:
+            print(f"  {C.dim('Password:')} {'•' * 12}")
     else:
-        print(f"  {C.dim('Password:')} {'•' * 12}")
+        print(f"  {C.dim('Username:')} {e.username}")
+        if show_password and e.password:
+            bits = password_entropy_bits(e.password)
+            print(
+                f"  {C.dim('Password:')} {e.password}  "
+                f"{C.dim(f'({bits:.0f} bits — {strength_label(bits)})')}"
+            )
+        elif e.password:
+            print(f"  {C.dim('Password:')} {'•' * 12}")
+        else:
+            print(f"  {C.dim('Password:')} {C.dim('(empty)')}")
+        if e.notes:
+            print(f"  {C.dim('Notes:   ')} {e.notes}")
     if e.url:
         print(f"  {C.dim('URL:     ')} {e.url}")
     if e.tags:
         print(f"  {C.dim('Tags:    ')} {', '.join(e.tags)}")
-    if e.notes:
-        print(f"  {C.dim('Notes:   ')} {e.notes}")
     if e.favorite:
         print(f"  {C.dim('Favorite:')} {C.yellow('yes')}")
     if e.totp_secret:
@@ -154,8 +180,7 @@ def print_entry(name: str, e: Entry, show_password: bool = True) -> None:
             code = totp_now(e.totp_secret)
             remaining = totp_seconds_remaining()
             print(
-                f"  {C.dim('TOTP:    ')} {C.green(code)} "
-                f"{C.dim(f'({remaining}s left)')}"
+                f"  {C.dim('TOTP:    ')} {C.green(format_totp_line(code, remaining))}"
             )
             uri = totp_uri(e.totp_secret, name)
             print(f"  {C.dim('otpauth: ')} {uri}")
@@ -230,21 +255,67 @@ def unlock_or_create(vault: Vault) -> bool:
 # =============================================================================
 
 
-def cmd_add(vault: Vault, name: Optional[str] = None) -> None:
+def cmd_add(
+    vault: Vault,
+    name: Optional[str] = None,
+    *,
+    as_note: bool = False,
+    gen: bool = False,
+    length: int = 20,
+    no_symbols: bool = False,
+    avoid_ambiguous: bool = False,
+    username: Optional[str] = None,
+    url: Optional[str] = None,
+    notes: Optional[str] = None,
+    password: Optional[str] = None,
+    non_interactive: bool = False,
+) -> None:
+    if as_note:
+        cmd_add_note(vault, name, notes=notes, non_interactive=non_interactive)
+        return
+
     if not name:
         name = prompt("Entry name (e.g. github)")
     if not name:
         return
     if name in vault.entries:
+        if non_interactive:
+            print(C.red(f"'{name}' already exists.\n"))
+            return
         if not prompt_yn(f"'{name}' exists. Overwrite?"):
             return
 
-    e = Entry()
+    e = Entry(kind="login")
+
+    if non_interactive or gen or username is not None or password is not None:
+        # Non-interactive / flag-driven path
+        e.username = username or ""
+        e.url = url or ""
+        e.notes = notes or ""
+        if gen or not password:
+            try:
+                e.password = generate_password(
+                    length=length,
+                    use_symbols=not no_symbols,
+                    avoid_ambiguous=avoid_ambiguous,
+                )
+            except ValueError as err:
+                print(C.red(f"Error: {err}"))
+                return
+            print(C.green(f"  Generated: {e.password}"))
+        else:
+            e.password = password
+        bits = password_entropy_bits(e.password)
+        print(C.dim(f"  Strength: {bits:.0f} bits — {strength_label(bits)}"))
+        vault.add(name, e)
+        print(C.green(f"Saved '{name}'.\n"))
+        return
+
     e.username = prompt("Username/email")
     e.url = prompt("URL")
 
     if prompt_yn("Generate a password?", default=True):
-        length = prompt_int("Length", 20)
+        length = prompt_int("Length", length)
         symbols = prompt_yn("Include symbols?", default=True)
         avoid = prompt_yn("Avoid ambiguous chars (Il1O0)?", default=False)
         try:
@@ -277,6 +348,57 @@ def cmd_add(vault: Vault, name: Optional[str] = None) -> None:
     print(C.green(f"Saved '{name}'.\n"))
 
 
+def cmd_add_note(
+    vault: Vault,
+    name: Optional[str] = None,
+    *,
+    notes: Optional[str] = None,
+    non_interactive: bool = False,
+) -> None:
+    """Add a secure note entry (notes field primary; username/password optional)."""
+    if not name:
+        name = prompt("Note name")
+    if not name:
+        return
+    if name in vault.entries:
+        if non_interactive:
+            print(C.red(f"'{name}' already exists.\n"))
+            return
+        if not prompt_yn(f"'{name}' exists. Overwrite?"):
+            return
+
+    e = Entry(kind=KIND_NOTE)
+    if notes is not None and non_interactive:
+        e.notes = notes
+    else:
+        if notes:
+            e.notes = notes
+        else:
+            print(C.dim("Enter note text (end with a single '.' on its own line):"))
+            lines: List[str] = []
+            try:
+                while True:
+                    line = input()
+                    if line.strip() == ".":
+                        break
+                    lines.append(line)
+            except (EOFError, KeyboardInterrupt):
+                print()
+            e.notes = "\n".join(lines)
+        if not non_interactive:
+            if prompt_yn("Add optional username?"):
+                e.username = prompt("Username")
+            if prompt_yn("Add optional password?"):
+                e.password = prompt_secret("Password")
+            tags_raw = prompt("Tags (comma-separated)")
+            e.tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            if prompt_yn("Pin as favorite?"):
+                e.favorite = True
+
+    vault.add(name, e)
+    print(C.green(f"Saved note '{name}'.\n"))
+
+
 def cmd_view(vault: Vault, name: Optional[str] = None) -> None:
     if not vault.entries:
         print(C.dim("Vault is empty.\n"))
@@ -289,12 +411,19 @@ def cmd_view(vault: Vault, name: Optional[str] = None) -> None:
         if favs:
             print(f"  {C.yellow('★ favorites')}")
             for n in favs:
-                print(f"    • {C.yellow(n)}")
+                e = vault.entries[n]
+                tag = C.dim(" [note]") if e.is_note() else ""
+                print(f"    • {C.yellow(n)}{tag}")
+        notes = sorted(n for n, e in vault.entries.items() if e.is_note() and not e.favorite)
+        if notes:
+            print(f"  {C.cyan('notes')}")
+            for n in notes:
+                print(f"    • {n} {C.dim('[note]')}")
         by_tag: dict = {}
         untagged = []
         for n, e in vault.entries.items():
-            if e.favorite:
-                continue  # already listed under favorites
+            if e.favorite or e.is_note():
+                continue  # already listed
             if e.tags:
                 for t in e.tags:
                     by_tag.setdefault(t, []).append(n)
@@ -322,7 +451,7 @@ def cmd_view(vault: Vault, name: Optional[str] = None) -> None:
         print()
         return
     print_entry(name, e)
-    if CLIPBOARD_AVAILABLE and prompt_yn("Copy password to clipboard?"):
+    if e.password and CLIPBOARD_AVAILABLE and prompt_yn("Copy password to clipboard?"):
         if copy_with_autoclear(e.password):
             print(C.green(f"Copied. Will clear in {_clipboard_timeout}s.\n"))
         else:
@@ -355,8 +484,9 @@ def cmd_search(
         for n in matches:
             e = vault.entries[n]
             star = C.yellow("★ ") if e.favorite else ""
+            kind = C.dim(" [note]") if e.is_note() else ""
             tag_str = f" {C.dim('[' + ','.join(e.tags) + ']')}" if e.tags else ""
-            print(f"  • {star}{n}{tag_str}")
+            print(f"  • {star}{n}{kind}{tag_str}")
     else:
         print(C.dim("\nNo exact matches."))
 
@@ -370,8 +500,9 @@ def cmd_search(
             for n, score in fuzzy_hits:
                 e = vault.entries[n]
                 star = C.yellow("★ ") if e.favorite else ""
+                kind = C.dim(" [note]") if e.is_note() else ""
                 tag_str = f" {C.dim('[' + ','.join(e.tags) + ']')}" if e.tags else ""
-                print(f"  • {star}{n}{tag_str}  {C.dim(f'score={score:.2f}')}")
+                print(f"  • {star}{n}{kind}{tag_str}  {C.dim(f'score={score:.2f}')}")
         elif not matches:
             print(C.dim("No fuzzy matches either."))
     print()
@@ -607,9 +738,106 @@ def cmd_change_master(vault: Vault) -> None:
     print(C.green("Master password changed.\n"))
 
 
-def cmd_audit(vault: Vault) -> None:
-    report = audit_vault(vault)
+def cmd_audit(vault: Vault, *, check_hibp: bool = False) -> None:
+    if check_hibp:
+        print(C.dim("Running HIBP k-anonymity check (only SHA-1 hash prefix is sent)..."))
+    report = audit_vault(vault, check_hibp=check_hibp)
     print_audit_report(report)
+
+
+def cmd_history(vault: Vault, name: Optional[str] = None) -> None:
+    """Show password history for an entry; optionally restore a previous password."""
+    if not name:
+        name = prompt("Entry name")
+    if not name:
+        return
+    e = vault.entries.get(name)
+    if not e:
+        print(C.red(f"No entry named '{name}'.\n"))
+        return
+    if not e.history:
+        print(C.dim(f"No password history for '{name}'.\n"))
+        return
+
+    print()
+    print(C.bold(C.cyan(f"=== Password history: {name} ===")))
+    print(C.dim(f"Current password: {'•' * min(12, max(4, len(e.password) or 4))}"))
+    print()
+    for i, item in enumerate(e.history, start=1):
+        pw = item.get("password", "")
+        ts = item.get("changed_at", 0)
+        when = time.ctime(ts) if ts else "unknown"
+        # Reveal previous passwords only in the history browser (unlocked vault)
+        print(f"  {C.cyan(str(i))}) {C.dim(when)}")
+        print(f"     {pw}")
+    print()
+
+    if not prompt_yn("Restore a previous password?"):
+        return
+    idx_raw = prompt("History number to restore")
+    try:
+        idx = int(idx_raw)
+    except (TypeError, ValueError):
+        print(C.red("Invalid number.\n"))
+        return
+    if idx < 1 or idx > len(e.history):
+        print(C.red("Out of range.\n"))
+        return
+    old = e.history[idx - 1]
+    old_pw = old.get("password", "")
+    if not old_pw:
+        print(C.red("That history entry has no password.\n"))
+        return
+    if not prompt_yn(f"Replace current password with history #{idx}?"):
+        return
+    # Push current into history before restore
+    if e.password:
+        e.history.append({"password": e.password, "changed_at": time.time()})
+        e.history = e.history[-10:]
+    e.password = old_pw
+    e.updated_at = time.time()
+    vault.entries[name] = e
+    vault.save()
+    print(C.green(f"Restored password from history #{idx} for '{name}'.\n"))
+
+
+def cmd_totp(
+    vault: Vault,
+    name: Optional[str] = None,
+    *,
+    watch: bool = False,
+    show_uri: bool = True,
+) -> None:
+    """Show current TOTP code, optional live --watch mode, and otpauth URI."""
+    if not name:
+        name = prompt("Entry name")
+    if not name:
+        return
+    e = vault.entries.get(name)
+    if not e:
+        print(C.red(f"No entry named '{name}'.\n"))
+        return
+    if not e.totp_secret:
+        print(C.red(f"'{name}' has no TOTP secret.\n"))
+        return
+    try:
+        if watch:
+            print(C.dim(f"Live TOTP for '{name}' (Ctrl+C to stop)"))
+            watch_totp(e.totp_secret)
+            return
+        code = totp_now(e.totp_secret)
+        rem = totp_seconds_remaining()
+        print()
+        print(C.bold(C.cyan(f"  TOTP — {name}")))
+        print(f"  {C.green(format_totp_line(code, rem))}")
+        if show_uri:
+            uri = totp_uri(e.totp_secret, name)
+            print()
+            print(format_otpauth_box(uri))
+            try_print_qr(uri)
+        print()
+    except ValueError as err:
+        print(C.red(f"TOTP error: {err}\n"))
 
 
 def cmd_stats(vault: Vault) -> None:
@@ -617,6 +845,8 @@ def cmd_stats(vault: Vault) -> None:
     print()
     print(C.bold(C.cyan("=== Vault Stats ===")))
     print(f"  Entries:     {s['total_entries']}")
+    print(f"  Logins:      {s.get('logins', s['total_entries'])}")
+    print(f"  Notes:       {s.get('notes', 0)}")
     print(f"  Favorites:   {s['favorites']}")
     print(f"  With TOTP:   {s['with_totp']}")
     print(f"  Without TOTP:{s['without_totp']}")
@@ -640,6 +870,7 @@ def cmd_completions(shell: str) -> int:
     """Print a shell completion script for bash or zsh."""
     commands = [
         "add",
+        "add-note",
         "view",
         "search",
         "edit",
@@ -653,6 +884,8 @@ def cmd_completions(shell: str) -> int:
         "import-csv",
         "master",
         "audit",
+        "history",
+        "totp",
         "stats",
         "completions",
     ]
@@ -664,7 +897,7 @@ _pwmanager_completions() {{
   cur="${{COMP_WORDS[COMP_CWORD]}}"
   prev="${{COMP_WORDS[COMP_CWORD-1]}}"
   local cmds="{' '.join(commands)}"
-  local opts="--vault --version --clipboard-timeout --lock-timeout --help"
+  local opts="--vault --profile --version --clipboard-timeout --lock-timeout --help"
 
   if [[ ${{COMP_CWORD}} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${{cmds}} ${{opts}}" -- "${{cur}}") )
@@ -679,6 +912,15 @@ _pwmanager_completions() {{
       ;;
     search)
       COMPREPLY=( $(compgen -W "--tag --fuzzy --no-fuzzy" -- "${{cur}}") )
+      ;;
+    audit)
+      COMPREPLY=( $(compgen -W "--hibp" -- "${{cur}}") )
+      ;;
+    totp)
+      COMPREPLY=( $(compgen -W "--watch" -- "${{cur}}") )
+      ;;
+    add)
+      COMPREPLY=( $(compgen -W "--gen --note --length --no-symbols" -- "${{cur}}") )
       ;;
     *)
       COMPREPLY=()
@@ -696,6 +938,7 @@ _pwmanager() {{
   local -a cmds
   cmds=(
     'add:add entry'
+    'add-note:add secure note'
     'view:view / list entries'
     'search:search entries (exact + fuzzy)'
     'edit:edit entry'
@@ -709,11 +952,14 @@ _pwmanager() {{
     'import-csv:import from CSV'
     'master:change master password'
     'audit:security audit'
+    'history:password history browser'
+    'totp:show / watch TOTP code'
     'stats:vault statistics'
     'completions:print shell completions'
   )
   _arguments \\
     '--vault[Path to vault file]:file:_files' \\
+    '--profile[Named vault profile]:profile:' \\
     '--clipboard-timeout[Clipboard clear seconds]:seconds:' \\
     '--lock-timeout[Idle lock seconds]:seconds:' \\
     '--version[Show version]' \\
@@ -735,6 +981,16 @@ _pwmanager() {{
           ;;
         search)
           _arguments '--tag[Filter by tag]:tag:' '--fuzzy' '--no-fuzzy'
+          ;;
+        audit)
+          _arguments '--hibp[Check passwords against Have I Been Pwned]'
+          ;;
+        totp)
+          _arguments '--watch[Live refresh until Ctrl+C]'
+          ;;
+        add)
+          _arguments '--gen[Generate password]' '--note[Create secure note]' \\
+            '--length[Password length]:len:' '--no-symbols'
           ;;
       esac
       ;;
@@ -764,6 +1020,10 @@ MENU = f"""
   {C.cyan('8')}  import      encrypted import
   {C.cyan('9')}  master      change master password
   {C.cyan('a')}  audit       security audit & health score
+  {C.cyan('h')}  hibp        audit + HIBP breach check (network)
+  {C.cyan('n')}  add-note    add secure note
+  {C.cyan('y')}  history     password history browser
+  {C.cyan('t')}  totp        show / watch TOTP code
   {C.cyan('c')}  import-csv  import from Bitwarden/Chrome CSV
   {C.cyan('e')}  export-csv  plaintext CSV export (dangerous)
   {C.cyan('p')}  pin         pin entry as favorite
@@ -819,7 +1079,17 @@ def interactive(vault: Vault) -> None:
             elif choice in ("9", "master"):
                 cmd_change_master(vault)
             elif choice in ("a", "audit"):
-                cmd_audit(vault)
+                cmd_audit(vault, check_hibp=False)
+            elif choice in ("h", "hibp"):
+                cmd_audit(vault, check_hibp=True)
+            elif choice in ("n", "add-note", "note"):
+                cmd_add_note(vault)
+            elif choice in ("y", "history"):
+                cmd_history(vault)
+            elif choice in ("t", "totp"):
+                name = prompt("Entry name")
+                watch = prompt_yn("Live watch mode?")
+                cmd_totp(vault, name or None, watch=watch)
             elif choice in ("c", "import-csv", "csv"):
                 cmd_import_csv(vault)
             elif choice in ("e", "export-csv"):
@@ -850,20 +1120,32 @@ def interactive(vault: Vault) -> None:
 # =============================================================================
 
 
-def default_vault_path() -> str:
-    """Vault path from PWMANAGER_VAULT env, else default."""
-    return os.environ.get("PWMANAGER_VAULT") or DEFAULT_VAULT_PATH
+def default_vault_path(
+    vault_arg: Optional[str] = None,
+    profile_arg: Optional[str] = None,
+) -> str:
+    """Resolve vault path from --vault, --profile / PWMANAGER_PROFILE, or env."""
+    return resolve_vault_path(vault_arg=vault_arg, profile_arg=profile_arg)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pwmanager",
-        description="Advanced local password manager (v2.1)",
+        description="Advanced local password manager (v2.2)",
     )
     p.add_argument(
         "--vault",
         default=None,
         help="Path to vault file (default: $PWMANAGER_VAULT or ./vault.json)",
+    )
+    p.add_argument(
+        "--profile",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Named vault profile (loads ~/.config/pwmanager/NAME.vault.json "
+            "or path from profiles.json). Also: $PWMANAGER_PROFILE"
+        ),
     )
     p.add_argument("--version", action="version", version=f"pwmanager {__version__}")
     p.add_argument(
@@ -882,7 +1164,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command")
 
-    sub.add_parser("add").add_argument("name", nargs="?")
+    add_p = sub.add_parser("add", help="Add a login entry")
+    add_p.add_argument("name", nargs="?")
+    add_p.add_argument(
+        "--note",
+        action="store_true",
+        help="Create a secure note instead of a login",
+    )
+    add_p.add_argument(
+        "--gen",
+        action="store_true",
+        help="Auto-generate password (non-interactive)",
+    )
+    add_p.add_argument("--length", type=int, default=20, help="Generated password length")
+    add_p.add_argument("--no-symbols", action="store_true")
+    add_p.add_argument("--avoid-ambiguous", action="store_true")
+    add_p.add_argument("--username", default=None, help="Username (with --gen)")
+    add_p.add_argument("--url", default=None, help="URL (with --gen)")
+    add_p.add_argument("--notes", default=None, help="Notes text")
+    add_p.add_argument(
+        "--password",
+        default=None,
+        help="Set password explicitly (prefer --gen)",
+    )
+
+    an = sub.add_parser("add-note", help="Add a secure note entry")
+    an.add_argument("name", nargs="?")
+    an.add_argument("--notes", default=None, help="Note body (non-interactive)")
+
     sub.add_parser("view").add_argument("name", nargs="?")
     sub.add_parser("edit").add_argument("name", nargs="?")
     sub.add_parser("delete").add_argument("name", nargs="?")
@@ -930,7 +1239,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("import")
     sub.add_parser("master")
-    sub.add_parser("audit", help="Run vault security audit")
+
+    audit_p = sub.add_parser("audit", help="Run vault security audit")
+    audit_p.add_argument(
+        "--hibp",
+        action="store_true",
+        help=(
+            "Optional: check passwords via Have I Been Pwned k-anonymity API "
+            "(sends only first 5 hex chars of SHA-1; never the full password)"
+        ),
+    )
+
+    hist_p = sub.add_parser("history", help="Browse / restore password history")
+    hist_p.add_argument("name", nargs="?")
+
+    totp_p = sub.add_parser("totp", help="Show TOTP code (optionally live watch)")
+    totp_p.add_argument("name", nargs="?")
+    totp_p.add_argument(
+        "--watch",
+        action="store_true",
+        help="Refresh code every second until Ctrl+C",
+    )
+
     sub.add_parser("stats", help="Show vault statistics")
 
     ic = sub.add_parser("import-csv", help="Import entries from CSV")
@@ -992,7 +1322,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(C.dim("(install argon2-cffi for stronger key derivation)"))
     print()
 
-    vault_path = args.vault if args.vault is not None else default_vault_path()
+    vault_path = default_vault_path(
+        vault_arg=getattr(args, "vault", None),
+        profile_arg=getattr(args, "profile", None),
+    )
     lock_timeout = args.lock_timeout if args.lock_timeout is not None else AUTOLOCK_SECONDS
     vault = Vault(vault_path, lock_timeout=lock_timeout)
     if not unlock_or_create(vault):
@@ -1002,7 +1335,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command is None:
             interactive(vault)
         elif args.command == "add":
-            cmd_add(vault, getattr(args, "name", None))
+            gen = bool(getattr(args, "gen", False))
+            non_interactive = gen or bool(getattr(args, "password", None))
+            cmd_add(
+                vault,
+                getattr(args, "name", None),
+                as_note=bool(getattr(args, "note", False)),
+                gen=gen,
+                length=int(getattr(args, "length", 20) or 20),
+                no_symbols=bool(getattr(args, "no_symbols", False)),
+                avoid_ambiguous=bool(getattr(args, "avoid_ambiguous", False)),
+                username=getattr(args, "username", None),
+                url=getattr(args, "url", None),
+                notes=getattr(args, "notes", None),
+                password=getattr(args, "password", None),
+                non_interactive=non_interactive,
+            )
+        elif args.command == "add-note":
+            notes = getattr(args, "notes", None)
+            cmd_add_note(
+                vault,
+                getattr(args, "name", None),
+                notes=notes,
+                non_interactive=notes is not None,
+            )
         elif args.command == "view":
             cmd_view(vault, getattr(args, "name", None))
         elif args.command == "edit":
@@ -1033,7 +1389,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "master":
             cmd_change_master(vault)
         elif args.command == "audit":
-            cmd_audit(vault)
+            cmd_audit(vault, check_hibp=bool(getattr(args, "hibp", False)))
+        elif args.command == "history":
+            cmd_history(vault, getattr(args, "name", None))
+        elif args.command == "totp":
+            cmd_totp(
+                vault,
+                getattr(args, "name", None),
+                watch=bool(getattr(args, "watch", False)),
+            )
         elif args.command == "stats":
             cmd_stats(vault)
         elif args.command == "import-csv":
@@ -1047,3 +1411,4 @@ def main(argv: Optional[List[str]] = None) -> int:
         vault.lock()
 
     return 0
+

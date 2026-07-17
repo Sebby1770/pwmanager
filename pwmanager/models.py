@@ -6,6 +6,11 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
+# Entry kinds
+KIND_LOGIN = "login"
+KIND_NOTE = "note"
+VALID_KINDS = frozenset({KIND_LOGIN, KIND_NOTE})
+
 
 @dataclass
 class Entry:
@@ -19,12 +24,19 @@ class Entry:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     favorite: bool = False
+    kind: str = KIND_LOGIN  # "login" | "note"
+
+    def is_note(self) -> bool:
+        return self.kind == KIND_NOTE
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Entry":
+        kind = d.get("kind", KIND_LOGIN) or KIND_LOGIN
+        if kind not in VALID_KINDS:
+            kind = KIND_LOGIN
         return cls(
             username=d.get("username", ""),
             password=d.get("password", ""),
@@ -36,4 +48,5 @@ class Entry:
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
             favorite=bool(d.get("favorite", False)),
+            kind=kind,
         )

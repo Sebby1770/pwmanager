@@ -42,6 +42,8 @@ def test_stats_structure(tmp_path):
 
     s = v.stats()
     assert s["total_entries"] == 2
+    assert s["logins"] == 2
+    assert s["notes"] == 0
     assert s["favorites"] == 1
     assert s["with_totp"] == 1
     assert s["without_totp"] == 1

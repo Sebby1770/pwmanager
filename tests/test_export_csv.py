@@ -48,6 +48,7 @@ def test_export_csv_headers_and_rows(tmp_path):
             "tags",
             "totp_secret",
             "favorite",
+            "kind",
         ]
         rows = list(reader)
 
@@ -58,5 +59,6 @@ def test_export_csv_headers_and_rows(tmp_path):
     assert rows[0]["password"] == "secret-Aa1!"
     assert rows[0]["totp_secret"] == "JBSWY3DPEHPK3PXP"
     assert rows[0]["favorite"] == "true"
+    assert rows[0]["kind"] == "login"
     assert "work" in rows[0]["tags"]
     assert rows[1]["favorite"] == "false"

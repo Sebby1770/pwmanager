@@ -267,6 +267,7 @@ class Vault:
             "tags",
             "totp_secret",
             "favorite",
+            "kind",
         ]
         count = 0
         with open(out_path, "w", encoding="utf-8", newline="") as f:
@@ -284,6 +285,7 @@ class Vault:
                         "tags": ",".join(e.tags),
                         "totp_secret": e.totp_secret,
                         "favorite": "true" if e.favorite else "false",
+                        "kind": getattr(e, "kind", "login") or "login",
                     }
                 )
                 count += 1
@@ -299,6 +301,8 @@ class Vault:
         tags_counter: Counter = Counter()
         with_totp = 0
         favorites = 0
+        notes = 0
+        logins = 0
         oldest_updated: Optional[Tuple[str, float]] = None
         newest_updated: Optional[Tuple[str, float]] = None
 
@@ -309,6 +313,10 @@ class Vault:
                 with_totp += 1
             if e.favorite:
                 favorites += 1
+            if getattr(e, "kind", "login") == "note":
+                notes += 1
+            else:
+                logins += 1
             ts = e.updated_at or e.created_at or 0.0
             if oldest_updated is None or ts < oldest_updated[1]:
                 oldest_updated = (name, ts)
@@ -318,6 +326,8 @@ class Vault:
         report = audit_vault(self)
         return {
             "total_entries": total,
+            "logins": logins,
+            "notes": notes,
             "favorites": favorites,
             "with_totp": with_totp,
             "without_totp": total - with_totp,
