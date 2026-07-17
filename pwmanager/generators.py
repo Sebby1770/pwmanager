@@ -8,7 +8,7 @@ import string
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from pwmanager.colors import C
 from pwmanager.constants import SYMBOLS
@@ -34,6 +34,48 @@ bonus book boost border boring borrow boss bottom bounce box boy bracket brain b
 brass brave bread breeze brick bridge brief bright bring brisk broccoli broken bronze
 broom brother brown brush bubble buddy budget buffalo build bulb bulk bullet bundle
 """.split()
+
+# Named generator policies (length + character classes)
+GENERATOR_PRESETS: Dict[str, Dict] = {
+    "pin": {
+        "length": 6,
+        "use_upper": False,
+        "use_digits": True,
+        "use_symbols": False,
+        "use_lower": False,
+        "avoid_ambiguous": False,
+        "digits_only": True,
+    },
+    "wifi": {
+        # 16 chars, easy to type on devices, no ambiguous glyphs
+        "length": 16,
+        "use_upper": True,
+        "use_digits": True,
+        "use_symbols": False,
+        "use_lower": True,
+        "avoid_ambiguous": True,
+        "digits_only": False,
+    },
+    "apple": {
+        # Apple-style strong password length with mixed classes, no ambiguous
+        "length": 20,
+        "use_upper": True,
+        "use_digits": True,
+        "use_symbols": True,
+        "use_lower": True,
+        "avoid_ambiguous": True,
+        "digits_only": False,
+    },
+    "max": {
+        "length": 64,
+        "use_upper": True,
+        "use_digits": True,
+        "use_symbols": True,
+        "use_lower": True,
+        "avoid_ambiguous": False,
+        "digits_only": False,
+    },
+}
 
 
 @lru_cache(maxsize=1)
@@ -78,9 +120,14 @@ def generate_password(
     use_digits: bool = True,
     use_symbols: bool = True,
     avoid_ambiguous: bool = False,
+    use_lower: bool = True,
+    digits_only: bool = False,
 ) -> str:
     if length < 4:
         raise ValueError("Length must be at least 4.")
+
+    if digits_only:
+        return "".join(secrets.choice(string.digits) for _ in range(length))
 
     lower = string.ascii_lowercase
     upper = string.ascii_uppercase
@@ -94,8 +141,11 @@ def generate_password(
         digits = "".join(c for c in digits if c not in ambiguous)
         syms = "".join(c for c in syms if c not in ambiguous)
 
-    pools = [lower]
-    required = [secrets.choice(lower)]
+    pools: List[str] = []
+    required: List[str] = []
+    if use_lower:
+        pools.append(lower)
+        required.append(secrets.choice(lower))
     if use_upper:
         pools.append(upper)
         required.append(secrets.choice(upper))
@@ -106,6 +156,12 @@ def generate_password(
         pools.append(syms)
         required.append(secrets.choice(syms))
 
+    if not pools:
+        raise ValueError("At least one character class must be enabled.")
+
+    if length < len(required):
+        raise ValueError(f"Length must be at least {len(required)} for selected classes.")
+
     all_chars = "".join(pools)
     chars = required + [secrets.choice(all_chars) for _ in range(length - len(required))]
     # Fisher-Yates with secrets
@@ -113,6 +169,25 @@ def generate_password(
         j = secrets.randbelow(i + 1)
         chars[i], chars[j] = chars[j], chars[i]
     return "".join(chars)
+
+
+def generate_from_preset(preset: str) -> str:
+    """Generate a password using a named policy (pin, wifi, apple, max)."""
+    key = (preset or "").strip().lower()
+    if key not in GENERATOR_PRESETS:
+        raise ValueError(
+            f"Unknown preset '{preset}'. Choose: {', '.join(sorted(GENERATOR_PRESETS))}."
+        )
+    opts = GENERATOR_PRESETS[key]
+    return generate_password(
+        length=int(opts["length"]),
+        use_upper=bool(opts.get("use_upper", True)),
+        use_digits=bool(opts.get("use_digits", True)),
+        use_symbols=bool(opts.get("use_symbols", True)),
+        avoid_ambiguous=bool(opts.get("avoid_ambiguous", False)),
+        use_lower=bool(opts.get("use_lower", True)),
+        digits_only=bool(opts.get("digits_only", False)),
+    )
 
 
 def generate_passphrase(words: int = 5, separator: str = "-", capitalize: bool = False) -> str:
