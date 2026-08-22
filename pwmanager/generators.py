@@ -8,7 +8,7 @@ import string
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pwmanager.colors import C
 from pwmanager.constants import SYMBOLS
@@ -200,10 +200,68 @@ def generate_passphrase(words: int = 5, separator: str = "-", capitalize: bool =
     return separator.join(chosen)
 
 
+def passphrase_entropy_bits(word_count: int, list_size: int) -> float:
+    """Entropy of a passphrase sampled uniformly with replacement."""
+    if word_count <= 0 or list_size < 2:
+        return 0.0
+    return word_count * math.log2(list_size)
+
+
+def _passphrase_estimate(secret: str) -> Optional[float]:
+    """Score `secret` as a dictionary passphrase, or None if it isn't one.
+
+    An attacker who knows the wordlist guesses whole words, so a five-word
+    phrase is ~5 * log2(2045) ≈ 55 bits — not the ~150 bits the character-pool
+    formula reports for the same 32 characters. Reporting the larger number
+    would tell people a passphrase is far stronger than it is.
+    """
+    wordlist = get_wordlist()
+    if len(wordlist) < 100:
+        return None
+    known = _wordset()
+
+    for separator in ("-", " ", ".", "_", ",", "+"):
+        if separator not in secret:
+            continue
+        parts = secret.split(separator)
+        if len(parts) < 2:
+            continue
+
+        recognised = 0
+        extra_chars = 0
+        for part in parts:
+            core = part.rstrip(string.digits + SYMBOLS)
+            extra_chars += len(part) - len(core)
+            if core and core.lower() in known:
+                recognised += 1
+
+        # Allow at most one unrecognised component (a name, a site, a suffix)
+        # before we stop treating this as a passphrase at all.
+        if recognised >= 2 and recognised >= len(parts) - 1:
+            bits = passphrase_entropy_bits(recognised, len(wordlist))
+            bits += (len(parts) - recognised) * math.log2(1000)  # crude, conservative
+            bits += extra_chars * math.log2(len(string.digits) + len(SYMBOLS))
+            return bits
+    return None
+
+
+@lru_cache(maxsize=1)
+def _wordset() -> frozenset:
+    return frozenset(get_wordlist())
+
+
 def password_entropy_bits(password: str) -> float:
-    """Estimate Shannon entropy of a password based on the character pool used."""
+    """Estimate the guessing entropy of a password.
+
+    Uses the character-pool model, except when the secret is recognisably a
+    passphrase built from our wordlist — then the smaller word-level estimate
+    wins, because that is the attack an adversary would actually run.
+    """
     if not password:
         return 0.0
+
+    phrase_bits = _passphrase_estimate(password)
+
     pool = 0
     if any(c.islower() for c in password):
         pool += 26
@@ -217,7 +275,11 @@ def password_entropy_bits(password: str) -> float:
         pool += 32  # rough other-chars allowance
     if pool == 0:
         return 0.0
-    return len(password) * math.log2(pool)
+
+    char_bits = len(password) * math.log2(pool)
+    if phrase_bits is not None and phrase_bits < char_bits:
+        return phrase_bits
+    return char_bits
 
 
 def strength_label(bits: float) -> str:

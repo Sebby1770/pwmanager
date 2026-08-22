@@ -22,6 +22,7 @@ from pwmanager.constants import (
     AUTOLOCK_SECONDS,
     CLIPBOARD_CLEAR_SECONDS,
     MAX_UNLOCK_ATTEMPTS,
+    SYMBOLS,
 )
 from pwmanager.crypto import ARGON2_AVAILABLE, decrypt_bytes, derive_key
 from pwmanager.generators import (
@@ -44,7 +45,7 @@ from pwmanager.totp import (
     try_print_qr,
     watch_totp,
 )
-from pwmanager.vault import Vault
+from pwmanager.vault import VAULT_FILE_MODE, Vault, VaultIntegrityError
 
 try:
     import pyperclip
@@ -286,6 +287,9 @@ def unlock_or_create(
         except InvalidToken:
             print(C.red("Wrong password (from PWMANAGER_PASSWORD)."), file=sys.stderr)
             return False
+        except VaultIntegrityError as e:
+            print(C.red(f"Integrity error: {e}"), file=sys.stderr)
+            return False
         except (ValueError, FileNotFoundError) as e:
             print(C.red(f"Error: {e}"), file=sys.stderr)
             return False
@@ -309,6 +313,10 @@ def unlock_or_create(
             if remaining > 0:
                 time.sleep(backoff)
                 backoff *= 2
+        except VaultIntegrityError as e:
+            # The password was right, so retrying cannot help.
+            print(C.red(f"Integrity error: {e}"))
+            return False
         except (ValueError, FileNotFoundError) as e:
             print(C.red(f"Error: {e}"))
             return False
@@ -683,6 +691,18 @@ def cmd_doctor(vault_path: Optional[str] = None) -> int:
     parent = os.path.dirname(os.path.abspath(path)) or "."
     writable = os.path.isdir(parent) and os.access(parent, os.W_OK)
     check(f"vault parent writable ({parent})", writable)
+
+    # Vault files written before 2.4 inherited the process umask, which usually
+    # leaves them readable by every local account.
+    if os.path.exists(path) and os.name != "nt":
+        mode = os.stat(path).st_mode & 0o777
+        tight = mode == VAULT_FILE_MODE
+        check(
+            "vault file permissions",
+            tight,
+            f"{oct(mode)}" if tight else f"{oct(mode)} — run `chmod 600 {path}`",
+            critical=False,
+        )
 
     # Crypto roundtrip with temp key
     crypto_ok = False
@@ -1604,10 +1624,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("gen", help="Generate password (no vault needed)")
     g.add_argument("--length", type=int, default=20)
-    g.add_argument("--no-symbols", action="store_true")
-    g.add_argument("--avoid-ambiguous", action="store_true")
+    g.add_argument("--no-lower", action="store_true", help="Exclude a-z")
+    g.add_argument("--no-upper", action="store_true", help="Exclude A-Z")
+    g.add_argument("--no-digits", action="store_true", help="Exclude 0-9")
+    # argparse runs help through %-formatting, so a literal % must be doubled.
+    g.add_argument(
+        "--no-symbols", action="store_true", help=f"Exclude {SYMBOLS.replace('%', '%%')}"
+    )
+    g.add_argument("--avoid-ambiguous", action="store_true", help="Drop Il1O0o and quotes")
     g.add_argument("--passphrase", action="store_true")
     g.add_argument("--words", type=int, default=5)
+    g.add_argument("--separator", default="-", help="Passphrase separator (default: -)")
+    g.add_argument("--capitalize", action="store_true", help="Capitalise passphrase words")
+    g.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="Generate N at once, one per line (for bulk rotation)",
+    )
     g.add_argument(
         "--preset",
         choices=sorted(GENERATOR_PRESETS.keys()),
@@ -1727,21 +1761,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_doctor(vault_path)
 
     if args.command == "gen":
+        count = max(1, int(getattr(args, "count", 1) or 1))
         try:
-            if getattr(args, "preset", None):
-                pw = generate_from_preset(args.preset)
-            elif args.passphrase:
-                pw = generate_passphrase(words=args.words)
-            else:
-                pw = generate_password(
-                    length=args.length,
-                    use_symbols=not args.no_symbols,
-                    avoid_ambiguous=args.avoid_ambiguous,
-                )
+            for _ in range(count):
+                if getattr(args, "preset", None):
+                    pw = generate_from_preset(args.preset)
+                elif args.passphrase:
+                    pw = generate_passphrase(
+                        words=args.words,
+                        separator=args.separator,
+                        capitalize=args.capitalize,
+                    )
+                else:
+                    pw = generate_password(
+                        length=args.length,
+                        use_lower=not args.no_lower,
+                        use_upper=not args.no_upper,
+                        use_digits=not args.no_digits,
+                        use_symbols=not args.no_symbols,
+                        avoid_ambiguous=args.avoid_ambiguous,
+                    )
+                print(pw)
         except ValueError as e:
             print(C.red(str(e)), file=sys.stderr)
             return 1
-        print(pw)
         return 0
 
     # Quiet path for get --copy scripting

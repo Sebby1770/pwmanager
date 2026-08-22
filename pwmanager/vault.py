@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import csv
-import hmac
 import json
 import os
 import time
@@ -21,8 +20,22 @@ from pwmanager.crypto import (
     file_hmac,
     generate_salt,
     secure_wipe,
+    verify_file_hmac,
 )
 from pwmanager.models import Entry
+
+# Owner read/write only. The vault holds ciphertext, but the salt, KDF choice
+# and file size are still worth keeping away from other local accounts.
+VAULT_FILE_MODE = 0o600
+
+
+class VaultIntegrityError(Exception):
+    """The vault decrypted, but its file-level HMAC does not match.
+
+    Raised only when the master password is provably correct — meaning the
+    mismatch is tampering with an authenticated-but-unencrypted field (the
+    salt, the KDF name, the version) rather than a typo.
+    """
 
 
 class Vault:
@@ -76,14 +89,23 @@ class Vault:
 
         key, _ = derive_key(master_password, salt, kdf)
 
-        # Integrity check (only if hmac field is present — keeps backwards compat)
-        if "hmac" in payload:
-            expected = file_hmac(payload, key)
-            if not hmac.compare_digest(expected, payload["hmac"]):
-                # Could be wrong password OR tampering — Fernet will tell us which
-                pass
-
+        # Decrypt first. A failure here means the password was wrong, which is
+        # by far the common case and must not be reported as tampering.
         plaintext = decrypt_bytes(token, key)  # raises InvalidToken on bad password
+
+        # The password is now known to be correct, so a bad HMAC can only mean
+        # the file was edited. Fernet authenticates the ciphertext but not the
+        # surrounding JSON, so without this check an attacker with write access
+        # could alter the version or KDF fields undetected.
+        if "hmac" in payload:
+            if not verify_file_hmac(payload, key):
+                secure_wipe(bytearray(key))
+                raise VaultIntegrityError(
+                    f"Vault integrity check failed for {self.path}. The password is "
+                    "correct but the file has been modified outside pwmanager. "
+                    "Restore from a backup, or run `pwmanager verify` for detail."
+                )
+
         raw = json.loads(plaintext.decode("utf-8"))
         self.entries = {name: Entry.from_dict(d) for name, d in raw.items()}
         self.key = key
@@ -93,8 +115,25 @@ class Vault:
     def save(self) -> None:
         if self.key is None:
             raise RuntimeError("Vault is locked")
-        with open(self.path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
+        # The salt lives only in the file, so it has to be read back rather
+        # than regenerated — re-deriving would orphan every existing entry.
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"Vault file disappeared while unlocked: {self.path}. "
+                "Nothing was written; restore the file and unlock again."
+            ) from e
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"Vault file became unreadable while unlocked: {self.path} ({e}). "
+                "Refusing to overwrite it — restore from a backup."
+            ) from e
+        if "salt" not in payload:
+            raise RuntimeError(
+                f"Vault file is missing its salt: {self.path}. Refusing to overwrite."
+            )
         raw = {name: e.to_dict() for name, e in self.entries.items()}
         ciphertext = encrypt_bytes(json.dumps(raw).encode("utf-8"), self.key)
         payload["vault"] = ciphertext.decode("ascii")
@@ -110,10 +149,63 @@ class Vault:
         self.key = None
 
     def _write(self, payload: dict) -> None:
+        """Write the vault atomically, owner-only, and durably.
+
+        The temp file is created with 0600 from the start (rather than being
+        chmod-ed afterwards) so there is no window where another local user can
+        open it. fsync before the rename, and fsync of the directory after,
+        keep a power loss from leaving a truncated or missing vault.
+        """
         tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(tmp, flags, VAULT_FILE_MODE)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            # Never leave a half-written temp file behind for a later run to find.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
         os.replace(tmp, self.path)
+
+        # Best effort: not every platform or filesystem allows opening a
+        # directory for fsync, and failing to do so should not fail the save.
+        try:
+            dir_fd = os.open(os.path.dirname(os.path.abspath(self.path)) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+
+    def file_mode(self) -> Optional[int]:
+        """Permission bits of the vault file, or None if it does not exist."""
+        try:
+            return os.stat(self.path).st_mode & 0o777
+        except OSError:
+            return None
+
+    def tighten_permissions(self) -> bool:
+        """Reduce an existing vault to owner-only. True if anything changed.
+
+        Vaults created before 2.4 were written with the process umask, which on
+        most systems means group- and world-readable.
+        """
+        mode = self.file_mode()
+        if mode is None or mode == VAULT_FILE_MODE:
+            return False
+        try:
+            os.chmod(self.path, VAULT_FILE_MODE)
+        except OSError:
+            return False
+        return True
 
     # ---- entry ops ----
 
@@ -189,9 +281,7 @@ class Vault:
         if "salt" not in payload or "vault" not in payload:
             return False, "Vault missing salt or ciphertext"
 
-        expected = file_hmac(payload, self.key)
-        stored = payload["hmac"]
-        if not hmac.compare_digest(expected, stored):
+        if not verify_file_hmac(payload, self.key):
             return False, "HMAC mismatch — vault may be tampered or key wrong"
 
         # Also confirm ciphertext still decrypts with current key

@@ -1,9 +1,15 @@
-# pwmanager 2.3
+# pwmanager 2.4
 
 Local encrypted password manager with TOTP watch, HIBP breach checks, rotation reminders, secure notes, vault profiles, favorites, fuzzy search, CSV/JSON import/export, `get --copy` scripting, `doctor` self-test, and a colorized CLI. No cloud, no accounts — your vault stays on your machine.
 
+**New in 2.4:** a [web generator](https://sebby1770.github.io/pwmanager/) — the same password and passphrase logic, running entirely in your browser. See [web/](web/).
+
 ## Highlights
 
+- **Web generator** — [static site](https://sebby1770.github.io/pwmanager/) sharing the CLI's presets, wordlist and entropy maths; nothing leaves the browser
+- **Enforced integrity** — a vault edited outside pwmanager now refuses to unlock instead of silently opening
+- **Owner-only vault files** — written `0600` atomically with `fsync`, never through the process umask
+- **Honest passphrase strength** — scored by words, not characters (a 5-word phrase is ~55 bits, not ~150)
 - **Strong KDF** — Argon2id by default (PBKDF2-HMAC-SHA256 fallback)
 - **Authenticated encryption** — Fernet (AES-128-CBC + HMAC-SHA256) plus file-level HMAC
 - **Rotation reminders** — per-entry `rotate_after_days` (default 90); `touch NAME` after you rotate
@@ -87,6 +93,9 @@ python -m pwmanager export-json backup.json --i-understand
 python -m pwmanager gen --length 32
 python -m pwmanager gen --preset wifi
 python -m pwmanager gen --preset pin
+python -m pwmanager gen --length 24 --no-symbols --avoid-ambiguous
+python -m pwmanager gen --passphrase --words 6 --separator . --capitalize
+python -m pwmanager gen --length 20 --count 10        # bulk rotation
 python -m pwmanager --vault /path/to/other.json view
 python -m pwmanager --profile work stats
 PWMANAGER_PROFILE=work python -m pwmanager
@@ -214,9 +223,15 @@ Default path: `vault.json` in the current working directory (or profile path).
   "kdf": "argon2id",
   "salt": "<base64 salt>",
   "vault": "<Fernet token>",
-  "hmac": "<sha256 hmac of salt+vault>"
+  "hmac": "<sha256 hmac over version+kdf+salt+vault>"
 }
 ```
+
+Since 2.4 the HMAC covers the `version` and `kdf` fields as well, so editing
+them is detected rather than surfacing as a confusing "wrong password". Vaults
+carrying the older salt+ciphertext HMAC still open, and are upgraded on the
+next save. The file itself is written `0600`; run `pwmanager doctor` to check
+an existing vault's permissions.
 
 **Backward compatible** with earlier vaults. New entry fields default when missing:
 
@@ -229,7 +244,7 @@ Other fields: `username`, `password`, `url`, `notes`, `tags`, `totp_secret`, `hi
 
 ```
 pwmanager/
-  __init__.py      # version 2.3.0
+  __init__.py      # version 2.4.0
   __main__.py
   crypto.py
   generators.py    # presets: pin|wifi|apple|max
@@ -244,16 +259,29 @@ pwmanager/
   cli.py
   colors.py
   constants.py
+scripts/
+  build_web_wordlist.py   # regenerates web/wordlist.js from package data
+web/                      # static browser generator (GitHub Pages)
+  index.html styles.css app.js generator.js wordlist.js
 ```
 
 ## Development
 
 ```bash
 pip install -e ".[full,test]"
-python -m pytest tests/ -q
+python -m pytest tests/ -q      # CLI + library + web parity
+node tests/js/run.mjs           # browser generator core
 ```
 
-CI runs pytest on Ubuntu with Python 3.11 and 3.12.
+Serve the web generator locally:
+
+```bash
+python3 -m http.server 8137 --directory web
+```
+
+CI runs pytest on Ubuntu with Python 3.11 and 3.12, plus the Node generator
+tests, and fails if `web/wordlist.js` has drifted from the packaged wordlist.
+`web/` deploys to GitHub Pages on every push to `main` that touches it.
 
 ## Security notes
 
@@ -262,6 +290,9 @@ CI runs pytest on Ubuntu with Python 3.11 and 3.12.
 - **Do not** commit `vault.json`, plaintext CSV/JSON exports, or real credentials.
 - HIBP is optional and uses k-anonymity (hash prefix only). See SECURITY.md.
 - Argon2id: time=3, memory=64 MiB, parallelism=4. PBKDF2 fallback: 600,000 iterations.
+- The vault file is owner-only (`0600`) and written atomically with `fsync`.
+- A vault that decrypts but fails its HMAC raises `VaultIntegrityError` rather than opening.
+- The web generator never transmits or stores a password; see [web/README.md](web/README.md).
 - See [SECURITY.md](SECURITY.md) for the full threat model.
 - This is a learning/hobby tool. For high-stakes use, prefer Bitwarden / 1Password / KeePassXC.
 

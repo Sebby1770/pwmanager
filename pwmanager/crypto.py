@@ -85,6 +85,43 @@ def decrypt_bytes(token: bytes, key: bytes) -> bytes:
 
 
 def file_hmac(payload: dict, key: bytes) -> str:
-    """HMAC over the salt+vault fields for tamper detection."""
+    """HMAC over every unencrypted vault field, for tamper detection.
+
+    Fernet authenticates the ciphertext but nothing around it, so the plain
+    JSON fields need their own MAC. Covering ``version`` and ``kdf`` as well as
+    ``salt`` means an edit to any of them is reported as tampering instead of
+    surfacing as a confusing "wrong password".
+
+    Domain-separated with a version tag and length prefixes so no two distinct
+    payloads can produce the same signed message.
+    """
+    parts = [
+        "pwmanager-vault-hmac-v2",
+        str(payload.get("version", "")),
+        str(payload.get("kdf", "")),
+        payload["salt"],
+        payload["vault"],
+    ]
+    msg = "|".join(f"{len(p)}:{p}" for p in parts).encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def legacy_file_hmac(payload: dict, key: bytes) -> str:
+    """The pre-2.4 HMAC, which covered only salt and ciphertext.
+
+    Kept so vaults written by earlier versions still open. They are upgraded to
+    the wider MAC the next time the vault is saved.
+    """
     msg = (payload["salt"] + "|" + payload["vault"]).encode("utf-8")
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def verify_file_hmac(payload: dict, key: bytes) -> bool:
+    """Constant-time check of a stored HMAC against the current or legacy form."""
+    stored = payload.get("hmac")
+    if not isinstance(stored, str):
+        return False
+    # Both comparisons always run so the result does not leak which form matched.
+    current = hmac.compare_digest(file_hmac(payload, key), stored)
+    legacy = hmac.compare_digest(legacy_file_hmac(payload, key), stored)
+    return current or legacy

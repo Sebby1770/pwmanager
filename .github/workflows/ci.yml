@@ -31,3 +31,16 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -q
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run web generator tests
+        run: node tests/js/run.mjs
+
+      - name: Check the bundled web wordlist is in sync
+        run: |
+          python3 scripts/build_web_wordlist.py
+          git diff --exit-code web/wordlist.js
