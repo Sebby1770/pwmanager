@@ -49,8 +49,10 @@ Derived key is urlsafe-base64-encoded for Fernet.
 
 - **Fernet** (AES-128-CBC + HMAC-SHA256) encrypts the JSON map of entries.
 - A separate **HMAC-SHA256** over `salt|vault` (using the derived key) detects
-  tampering of the on-disk wrapper. Wrong master password and tampering both
-  surface as decryption failure (`InvalidToken`).
+  changes to those fields. When present, an invalid HMAC and a wrong master
+  password both fail unlock with `InvalidToken`. Legacy files without this
+  extra HMAC remain readable; their ciphertext is still authenticated by
+  Fernet. The extra HMAC does not cover version or KDF metadata.
 - **`pwmanager verify`** re-reads the vault file, recomputes the HMAC, and
   confirms the ciphertext still decrypts — without listing entry contents.
 
@@ -142,7 +144,7 @@ Both commands write **passwords, notes, and TOTP secrets in cleartext**.
 
 1. **Master password** — long passphrase (≥ 5 random words) or ≥ 16 chars with high entropy. There is **no recovery**.
 2. **Install Argon2** — `pip install "pwmanager[full]"` so Argon2id is used. Run `pwmanager doctor` to confirm.
-3. **Permissions** — keep vault files on an encrypted volume; restrict file mode (`chmod 600`).
+3. **Permissions** — vault files and all exports are created with owner-only mode (`0600` on POSIX); still keep them on an encrypted volume.
 4. **Backups** — use **encrypted** export; never commit vault files to git.
 5. **Plaintext CSV/JSON export** — treat as highly sensitive; delete when finished.
 6. **Clipboard** — `get --copy` and interactive copy use auto-clear (`--clipboard-timeout`); still avoid shared machines.
@@ -154,6 +156,9 @@ Both commands write **passwords, notes, and TOTP secrets in cleartext**.
 12. **Memory** — Python strings cannot be securely wiped; assume secrets may linger until process exit.
 13. **History / TOTP watch** — history browser shows previous passwords only while unlocked; live TOTP is terminal-only.
 14. **Automation** — avoid `--password-env` except for ephemeral test vaults.
+15. **Secret CLI input** — never put passwords or secure-note contents in command-line arguments. Use the hidden password prompt or interactive note input, `--password-stdin` / `--notes-stdin`, or the corresponding `--*-fd` option; legacy `--password` and `--notes` values are rejected.
+16. **Crash-safe writes** — secret files use random same-directory temporary files, file `fsync`, atomic replacement, and directory `fsync` where supported. Existing output symlinks are replaced, not followed.
+17. **Strength checks** — the estimator caps character-pool estimates using observed entropy and exact repetition/sequence detection; trivially predictable master passwords are rejected rather than accepted based on length alone. These checks are heuristic, do not use a password dictionary, and cannot guarantee resistance to guessing.
 
 ## Reporting issues
 

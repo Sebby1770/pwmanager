@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import secrets
 import string
+from collections import Counter
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
@@ -201,23 +202,77 @@ def generate_passphrase(words: int = 5, separator: str = "-", capitalize: bool =
 
 
 def password_entropy_bits(password: str) -> float:
-    """Estimate Shannon entropy of a password based on the character pool used."""
+    """Conservatively estimate password entropy from pool and repetition.
+
+    A character-pool upper bound alone labels values such as ``"a" * 20`` as
+    strong.  Cap that bound by the observed Shannon entropy and by the shortest
+    periodic unit so visibly repetitive passwords cannot gain strength merely
+    by getting longer.
+    """
     if not password:
         return 0.0
-    pool = 0
-    if any(c.islower() for c in password):
-        pool += 26
-    if any(c.isupper() for c in password):
-        pool += 26
-    if any(c.isdigit() for c in password):
-        pool += 10
-    if any(c in SYMBOLS for c in password):
-        pool += len(SYMBOLS)
-    if any(c not in string.ascii_letters + string.digits + SYMBOLS for c in password):
-        pool += 32  # rough other-chars allowance
+
+    def pool_size(value: str) -> int:
+        size = 0
+        if any(c.islower() for c in value):
+            size += 26
+        if any(c.isupper() for c in value):
+            size += 26
+        if any(c.isdigit() for c in value):
+            size += 10
+        if any(c in SYMBOLS for c in value):
+            size += len(SYMBOLS)
+        if any(c not in string.ascii_letters + string.digits + SYMBOLS for c in value):
+            size += 32
+        return size
+
+    pool = pool_size(password)
     if pool == 0:
         return 0.0
-    return len(password) * math.log2(pool)
+    pool_upper_bound = len(password) * math.log2(pool)
+
+    def observed_entropy(value: str) -> float:
+        bits = 0.0
+        for count in Counter(value).values():
+            probability = count / len(value)
+            bits -= count * math.log2(probability)
+        return bits
+
+    observed_bits = observed_entropy(password)
+
+    repetition_bound = pool_upper_bound
+    for unit_length in range(1, (len(password) // 2) + 1):
+        unit = password[:unit_length]
+        repetitions = (len(password) + unit_length - 1) // unit_length
+        if (unit * repetitions)[: len(password)] == password:
+            repetition_bound = observed_entropy(unit) + math.log2(repetitions)
+            break
+
+    sequence_bound = pool_upper_bound
+    normalized = password.casefold()
+    known_sequences = (
+        string.digits,
+        string.ascii_lowercase,
+        "qwertyuiopasdfghjklzxcvbnm",
+    )
+    for sequence in known_sequences:
+        for direction in (sequence, sequence[::-1]):
+            for offset in range(len(direction)):
+                cycle = direction[offset:] + direction[:offset]
+                candidate = (cycle * ((len(normalized) // len(cycle)) + 1))[
+                    : len(normalized)
+                ]
+                if normalized == candidate:
+                    sequence_bound = math.log2(len(direction)) + math.log2(
+                        max(1, len(password))
+                    )
+                    break
+            if sequence_bound != pool_upper_bound:
+                break
+        if sequence_bound != pool_upper_bound:
+            break
+
+    return min(pool_upper_bound, observed_bits, repetition_bound, sequence_bound)
 
 
 def strength_label(bits: float) -> str:

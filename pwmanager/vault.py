@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 
-from pwmanager.constants import AUTOLOCK_SECONDS, DEFAULT_VAULT_PATH, VAULT_VERSION
+from pwmanager.constants import (
+    AUTOLOCK_SECONDS,
+    DEFAULT_VAULT_PATH,
+    MIN_MASTER_PASSWORD_ENTROPY_BITS,
+    VAULT_VERSION,
+)
 from pwmanager.crypto import (
     decrypt_bytes,
     derive_key,
@@ -23,6 +28,8 @@ from pwmanager.crypto import (
     secure_wipe,
 )
 from pwmanager.models import Entry
+from pwmanager.secure_io import atomic_private_text_writer
+from pwmanager.generators import password_entropy_bits
 
 
 class Vault:
@@ -42,6 +49,10 @@ class Vault:
         return os.path.exists(self.path)
 
     def create(self, master_password: str, kdf: str = "auto") -> None:
+        if len(master_password) < 10:
+            raise ValueError("Master password must be at least 10 characters")
+        if password_entropy_bits(master_password) < MIN_MASTER_PASSWORD_ENTROPY_BITS:
+            raise ValueError("Master password is too predictable")
         salt = generate_salt()
         key, kdf_used = derive_key(master_password, salt, kdf)
         ciphertext = encrypt_bytes(json.dumps({}).encode("utf-8"), key)
@@ -79,9 +90,14 @@ class Vault:
         # Integrity check (only if hmac field is present — keeps backwards compat)
         if "hmac" in payload:
             expected = file_hmac(payload, key)
-            if not hmac.compare_digest(expected, payload["hmac"]):
-                # Could be wrong password OR tampering — Fernet will tell us which
-                pass
+            stored_hmac = payload["hmac"]
+            if (
+                not isinstance(stored_hmac, str)
+                or not stored_hmac.isascii()
+                or not hmac.compare_digest(expected, stored_hmac)
+            ):
+                # Keep wrong-password and tampering failures indistinguishable.
+                raise InvalidToken
 
         plaintext = decrypt_bytes(token, key)  # raises InvalidToken on bad password
         raw = json.loads(plaintext.decode("utf-8"))
@@ -110,10 +126,39 @@ class Vault:
         self.key = None
 
     def _write(self, payload: dict) -> None:
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        with atomic_private_text_writer(self.path) as f:
             json.dump(payload, f, indent=2)
-        os.replace(tmp, self.path)
+
+    def change_master_password(self, new_password: str, kdf: str = "auto") -> None:
+        """Atomically re-encrypt the unlocked vault under ``new_password``.
+
+        All expensive derivation and encryption work happens before the durable
+        replacement.  If any step fails, the original vault file and in-memory
+        key remain usable.
+        """
+        if self.key is None:
+            raise RuntimeError("Vault is locked")
+        if len(new_password) < 10:
+            raise ValueError("Master password must be at least 10 characters")
+        if password_entropy_bits(new_password) < MIN_MASTER_PASSWORD_ENTROPY_BITS:
+            raise ValueError("Master password is too predictable")
+
+        salt = generate_salt()
+        new_key, kdf_used = derive_key(new_password, salt, kdf)
+        raw = {name: entry.to_dict() for name, entry in self.entries.items()}
+        ciphertext = encrypt_bytes(json.dumps(raw).encode("utf-8"), new_key)
+        payload = {
+            "version": VAULT_VERSION,
+            "kdf": kdf_used,
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "vault": ciphertext.decode("ascii"),
+        }
+        payload["hmac"] = file_hmac(payload, new_key)
+
+        self._write(payload)
+        self.key = new_key
+        self.kdf_used = kdf_used
+        self.last_activity = time.time()
 
     # ---- entry ops ----
 
@@ -191,7 +236,11 @@ class Vault:
 
         expected = file_hmac(payload, self.key)
         stored = payload["hmac"]
-        if not hmac.compare_digest(expected, stored):
+        if (
+            not isinstance(stored, str)
+            or not stored.isascii()
+            or not hmac.compare_digest(expected, stored)
+        ):
             return False, "HMAC mismatch — vault may be tampered or key wrong"
 
         # Also confirm ciphertext still decrypts with current key
@@ -291,7 +340,7 @@ class Vault:
             "vault": ct.decode("ascii"),
             "exported_at": time.time(),
         }
-        with open(out_path, "w", encoding="utf-8") as f:
+        with atomic_private_text_writer(out_path) as f:
             json.dump(payload, f, indent=2)
 
     def import_encrypted(self, in_path: str, password: str, merge: bool = True) -> int:
@@ -327,7 +376,7 @@ class Vault:
             "kind",
         ]
         count = 0
-        with open(out_path, "w", encoding="utf-8", newline="") as f:
+        with atomic_private_text_writer(out_path, newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for name in self.sorted_entry_names():
@@ -361,7 +410,7 @@ class Vault:
         }
         for name in self.sorted_entry_names():
             payload["entries"][name] = self.entries[name].to_dict()
-        with open(out_path, "w", encoding="utf-8") as f:
+        with atomic_private_text_writer(out_path) as f:
             json.dump(payload, f, indent=2)
         return len(payload["entries"])
 

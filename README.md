@@ -59,7 +59,11 @@ python pwmanager.py
 pwmanager
 ```
 
-First run creates a master password (min 10 characters, strength check). Later runs unlock the vault. Menu includes add/view/search/edit, audit, TOTP, notes, recent, touch, verify, doctor, and export options. Idle auto-lock **clears the screen** before re-prompting.
+First run creates a master password (min 10 characters, conservative strength
+check; trivially repetitive/sequence-based values are rejected). Later runs
+unlock the vault. Menu includes add/view/search/edit, audit, TOTP, notes, recent,
+touch, verify, doctor, and export options. Idle auto-lock **clears the screen**
+before re-prompting.
 
 ### One-shot commands
 
@@ -67,7 +71,8 @@ First run creates a master password (min 10 characters, strength check). Later r
 python -m pwmanager add github
 python -m pwmanager add github --gen --length 20 --username me@ex.com
 python -m pwmanager add wifi --gen --preset wifi
-python -m pwmanager add-note wifi --notes "SSID guest / pass …"
+printf '%s\n' "$ENTRY_PASSWORD" | python -m pwmanager add github --password-stdin
+printf '%s\n' "SSID guest / pass …" | python -m pwmanager add-note wifi --notes-stdin
 python -m pwmanager view github
 python -m pwmanager get github --copy password
 python -m pwmanager get github --copy username
@@ -106,6 +111,24 @@ python -m pwmanager get github
 ```
 
 Fields: `password`, `username`, `totp`, `url`. Viewing or copying updates `last_accessed` for `recent`.
+
+### Supplying a password to `add`
+
+Without a password input option or `--gen`, `add` starts an interactive flow
+that offers password generation or a hidden terminal prompt. For controlled
+automation, pass the secret through standard input or an already-open file
+descriptor:
+
+```bash
+printf '%s\n' "$ENTRY_PASSWORD" | python -m pwmanager add github --password-stdin
+python -m pwmanager add github --password-fd 3 3< /secure/path/password
+```
+
+**Breaking security change:** the former `--password VALUE` and `--notes VALUE`
+options are now rejected because command-line values can be exposed by shell
+history, process listings, diagnostic tooling, and logs. Use the interactive
+password prompt or interactive note input, `--password-stdin` / `--notes-stdin`, or the corresponding
+file-descriptor option instead.
 
 ### Automation unlock (`--password-env`) — insecure opt-in
 
@@ -187,6 +210,12 @@ Both write **passwords and TOTP secrets in cleartext**. Prefer encrypted `export
 }
 ```
 
+Vault files and every export are written with owner-only permissions (`0600` on
+POSIX systems). Writes use an unpredictable same-directory temporary file,
+flush file contents before an atomic replacement, and sync the directory where
+the platform supports it. Pre-existing output symlinks are replaced rather than
+followed.
+
 ## Security audit
 
 ```bash
@@ -241,6 +270,7 @@ pwmanager/
   hibp.py
   profiles.py
   importers.py
+  secure_io.py     # private, durable atomic file replacement
   cli.py
   colors.py
   constants.py
@@ -258,6 +288,11 @@ CI runs pytest on Ubuntu with Python 3.11 and 3.12.
 ## Security notes
 
 - The master password is **never** stored. Forget it and the vault is unrecoverable.
+- Password strength is capped by observed entropy and repetition/sequence checks, so repeated characters cannot masquerade as a strong master password.
+- Strength estimates are heuristic; they do not check dictionaries or guarantee resistance to password guessing.
+- Master-password changes are transactional: the existing vault remains usable if re-encryption or the atomic write fails.
+- Vaults and encrypted/plaintext exports are created owner-readable/writable only (`0600` on POSIX).
+- Never pass entry passwords or secure notes as command-line values; use the prompt, `--password-stdin` / `--notes-stdin`, or the corresponding `--*-fd` option.
 - **Do not** use `--password-env` / `PWMANAGER_PASSWORD` for production secrets.
 - **Do not** commit `vault.json`, plaintext CSV/JSON exports, or real credentials.
 - HIBP is optional and uses k-anonymity (hash prefix only). See SECURITY.md.

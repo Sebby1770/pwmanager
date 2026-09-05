@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
 import getpass
-import json
 import os
 import sys
 import threading
@@ -22,8 +20,9 @@ from pwmanager.constants import (
     AUTOLOCK_SECONDS,
     CLIPBOARD_CLEAR_SECONDS,
     MAX_UNLOCK_ATTEMPTS,
+    MIN_MASTER_PASSWORD_ENTROPY_BITS,
 )
-from pwmanager.crypto import ARGON2_AVAILABLE, decrypt_bytes, derive_key
+from pwmanager.crypto import ARGON2_AVAILABLE, derive_key
 from pwmanager.generators import (
     GENERATOR_PRESETS,
     generate_from_preset,
@@ -132,6 +131,72 @@ def prompt_secret(text: str) -> str:
     except (EOFError, KeyboardInterrupt):
         print()
         return ""
+
+
+def read_secret_input(
+    *,
+    stdin: bool = False,
+    fd: Optional[int] = None,
+    multiline: bool = False,
+    label: str = "secret",
+) -> str:
+    """Read secret text without placing it in process arguments."""
+    if stdin == (fd is not None):
+        raise ValueError(f"Choose exactly one {label} input source")
+
+    if stdin:
+        stream = sys.stdin
+        source = "standard input"
+        should_close = False
+    else:
+        if fd is None or fd < 0:
+            raise ValueError(
+                f"{label.capitalize()} file descriptor must be non-negative"
+            )
+        try:
+            stream = os.fdopen(os.dup(fd), "r", encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(
+                f"Cannot read {label} file descriptor {fd}: {exc}"
+            ) from exc
+        source = f"file descriptor {fd}"
+        should_close = True
+
+    try:
+        try:
+            value = stream.read() if multiline else stream.readline()
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"Cannot read {label} from {source}: {exc}") from exc
+    finally:
+        if should_close:
+            stream.close()
+
+    if value == "":
+        raise ValueError(f"No {label} was provided on {source}")
+    if multiline:
+        if value.endswith("\n"):
+            value = value[:-1]
+        if value.endswith("\r"):
+            value = value[:-1]
+    else:
+        value = value.rstrip("\r\n")
+    if not value:
+        raise ValueError(f"{label.capitalize()} from {source} is empty")
+    return value
+
+
+def read_secret_option(args: argparse.Namespace, name: str) -> Optional[str]:
+    """Read an optional ``--<name>-stdin`` / ``--<name>-fd`` value."""
+    from_stdin = bool(getattr(args, f"{name}_stdin", False))
+    fd = getattr(args, f"{name}_fd", None)
+    if not from_stdin and fd is None:
+        return None
+    return read_secret_input(
+        stdin=from_stdin,
+        fd=fd,
+        multiline=name == "notes",
+        label=name,
+    )
 
 
 def prompt_yn(text: str, default: bool = False) -> bool:
@@ -245,6 +310,9 @@ def unlock_or_create(
             if len(env_pw) < 10:
                 print(C.red("Master password from env must be at least 10 characters."))
                 return False
+            if password_entropy_bits(env_pw) < MIN_MASTER_PASSWORD_ENTROPY_BITS:
+                print(C.red("Master password from env is too predictable."))
+                return False
             vault.create(env_pw)
             if not quiet:
                 print(C.green("Vault created.\n"))
@@ -263,6 +331,9 @@ def unlock_or_create(
                 continue
             bits = password_entropy_bits(pw1)
             print(C.dim(f"  Strength: {bits:.0f} bits — {strength_label(bits)}"))
+            if bits < MIN_MASTER_PASSWORD_ENTROPY_BITS:
+                print(C.red("That password is too predictable. Choose a stronger one."))
+                continue
             if bits < 50 and not prompt_yn("That's not very strong. Use it anyway?"):
                 continue
             pw2 = prompt_secret("Confirm master password")
@@ -353,12 +424,12 @@ def cmd_add(
 
     e = Entry(kind="login")
 
-    if non_interactive or gen or username is not None or password is not None:
+    if non_interactive or gen or password is not None:
         # Non-interactive / flag-driven path
         e.username = username or ""
         e.url = url or ""
         e.notes = notes or ""
-        if gen or not password:
+        if gen:
             try:
                 e.password = generate_password(
                     length=length,
@@ -369,6 +440,9 @@ def cmd_add(
                 print(C.red(f"Error: {err}"))
                 return
             print(C.green(f"  Generated: {e.password}"))
+        elif password is None:
+            print(C.red("A password source or --gen is required for non-interactive add."))
+            return
         else:
             e.password = password
         bits = password_entropy_bits(e.password)
@@ -377,8 +451,8 @@ def cmd_add(
         print(C.green(f"Saved '{name}'.\n"))
         return
 
-    e.username = prompt("Username/email")
-    e.url = prompt("URL")
+    e.username = username if username is not None else prompt("Username/email")
+    e.url = url if url is not None else prompt("URL")
 
     if prompt_yn("Generate a password?", default=True):
         length = prompt_int("Length", length)
@@ -402,7 +476,7 @@ def cmd_add(
 
     tags_raw = prompt("Tags (comma-separated)")
     e.tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-    e.notes = prompt("Notes")
+    e.notes = notes if notes is not None else prompt("Notes")
 
     if prompt_yn("Add a TOTP secret (2FA)?"):
         e.totp_secret = prompt("Base32 secret")
@@ -1011,12 +1085,10 @@ def cmd_change_master(vault: Vault) -> None:
     print(C.yellow("Changing master password will re-encrypt the vault."))
     current = prompt_secret("Current master password")
     try:
-        with open(vault.path) as f:
-            payload = json.load(f)
-        salt = base64.b64decode(payload["salt"])
-        key, _ = derive_key(current, salt, payload.get("kdf", "pbkdf2"))
-        decrypt_bytes(payload["vault"].encode("ascii"), key)
-    except (InvalidToken, ValueError, FileNotFoundError, KeyError):
+        verifier = Vault(vault.path)
+        verifier.unlock(current)
+        verifier.lock()
+    except (InvalidToken, ValueError, OSError, KeyError):
         print(C.red("Wrong password.\n"))
         return
 
@@ -1024,16 +1096,23 @@ def cmd_change_master(vault: Vault) -> None:
     if len(new1) < 10:
         print(C.yellow("At least 10 characters.\n"))
         return
+    bits = password_entropy_bits(new1)
+    print(C.dim(f"  Strength: {bits:.0f} bits — {strength_label(bits)}"))
+    if bits < MIN_MASTER_PASSWORD_ENTROPY_BITS:
+        print(C.red("That password is too predictable.\n"))
+        return
+    if bits < 50 and not prompt_yn("That's not very strong. Use it anyway?"):
+        return
     new2 = prompt_secret("Confirm new password")
     if new1 != new2:
         print(C.red("Passwords don't match.\n"))
         return
 
-    entries_backup = vault.entries.copy()
-    os.remove(vault.path)
-    vault.create(new1)
-    vault.entries = entries_backup
-    vault.save()
+    try:
+        vault.change_master_password(new1)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(C.red(f"Master password unchanged: {exc}\n"))
+        return
     print(C.green("Master password changed.\n"))
 
 
@@ -1234,7 +1313,10 @@ _pwmanager_completions() {{
       COMPREPLY=( $(compgen -W "pin wifi apple max" -- "${{cur}}") )
       ;;
     add)
-      COMPREPLY=( $(compgen -W "--gen --note --length --no-symbols --preset" -- "${{cur}}") )
+      COMPREPLY=( $(compgen -W "--gen --note --length --no-symbols --preset --password-stdin --password-fd --notes-stdin --notes-fd" -- "${{cur}}") )
+      ;;
+    add-note)
+      COMPREPLY=( $(compgen -W "--notes-stdin --notes-fd" -- "${{cur}}") )
       ;;
     *)
       COMPREPLY=()
@@ -1318,7 +1400,15 @@ _pwmanager() {{
           ;;
         add)
           _arguments '--gen[Generate password]' '--note[Create secure note]' \\
-            '--length[Password length]:len:' '--no-symbols' '--preset[Policy]:preset:(pin wifi apple max)'
+            '--length[Password length]:len:' '--no-symbols' '--preset[Policy]:preset:(pin wifi apple max)' \\
+            '--password-stdin[Read password from standard input]' \\
+            '--password-fd[Read password from file descriptor]:fd:' \\
+            '--notes-stdin[Read notes from standard input]' \\
+            '--notes-fd[Read notes from file descriptor]:fd:'
+          ;;
+        add-note)
+          _arguments '--notes-stdin[Read note body from standard input]' \\
+            '--notes-fd[Read note body from file descriptor]:fd:'
           ;;
       esac
       ;;
@@ -1482,6 +1572,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pwmanager",
         description="Advanced local password manager (v2.3)",
+        allow_abbrev=False,
     )
     p.add_argument(
         "--vault",
@@ -1543,18 +1634,50 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Generator policy: pin|wifi|apple|max (implies --gen)",
     )
-    add_p.add_argument("--username", default=None, help="Username (with --gen)")
-    add_p.add_argument("--url", default=None, help="URL (with --gen)")
-    add_p.add_argument("--notes", default=None, help="Notes text")
-    add_p.add_argument(
-        "--password",
+    add_p.add_argument("--username", default=None, help="Username for the new entry")
+    add_p.add_argument("--url", default=None, help="URL for the new entry")
+    notes_source = add_p.add_mutually_exclusive_group()
+    notes_source.add_argument(
+        "--notes-stdin",
+        action="store_true",
+        help="Read notes from standard input until EOF",
+    )
+    notes_source.add_argument(
+        "--notes-fd",
+        type=int,
+        metavar="FD",
         default=None,
-        help="Set password explicitly (prefer --gen)",
+        help="Read notes from an already-open file descriptor until EOF",
+    )
+    password_source = add_p.add_mutually_exclusive_group()
+    password_source.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Read the entry password from one line of standard input",
+    )
+    password_source.add_argument(
+        "--password-fd",
+        type=int,
+        metavar="FD",
+        default=None,
+        help="Read the entry password from an already-open file descriptor",
     )
 
     an = sub.add_parser("add-note", help="Add a secure note entry")
     an.add_argument("name", nargs="?")
-    an.add_argument("--notes", default=None, help="Note body (non-interactive)")
+    note_body_source = an.add_mutually_exclusive_group()
+    note_body_source.add_argument(
+        "--notes-stdin",
+        action="store_true",
+        help="Read the note body from standard input until EOF",
+    )
+    note_body_source.add_argument(
+        "--notes-fd",
+        type=int,
+        metavar="FD",
+        default=None,
+        help="Read the note body from an already-open file descriptor until EOF",
+    )
 
     sub.add_parser("view").add_argument("name", nargs="?")
     sub.add_parser("edit").add_argument("name", nargs="?")
@@ -1707,8 +1830,81 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    legacy_secret_option = next(
+        (
+            option
+            for option in ("--password", "--notes")
+            if any(
+                argument == option or argument.startswith(f"{option}=")
+                for argument in raw_argv
+            )
+        ),
+        None,
+    )
+    if legacy_secret_option is not None:
+        replacement = (
+            "--password-stdin or --password-fd"
+            if legacy_secret_option == "--password"
+            else "--notes-stdin or --notes-fd"
+        )
+        print(
+            C.red(
+                f"{legacy_secret_option} is disabled because command-line arguments "
+                f"and shell history can expose secrets. Use {replacement} or the "
+                "interactive prompt."
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
+
+    if args.command == "add":
+        as_note = bool(getattr(args, "note", False))
+        has_secret_source = bool(getattr(args, "password_stdin", False)) or (
+            getattr(args, "password_fd", None) is not None
+        )
+        uses_generation = bool(getattr(args, "gen", False)) or (
+            getattr(args, "preset", None) is not None
+        )
+        if as_note and (has_secret_source or uses_generation):
+            print(
+                C.red("Secure notes do not accept password generation or input."),
+                file=sys.stderr,
+            )
+            return 2
+        if has_secret_source and uses_generation:
+            print(
+                C.red("Choose either a password input source or password generation."),
+                file=sys.stderr,
+            )
+            return 2
+        password_source_fd = (
+            0
+            if bool(getattr(args, "password_stdin", False))
+            else getattr(args, "password_fd", None)
+        )
+        notes_from_stdin = bool(getattr(args, "notes_stdin", False))
+        notes_source_fd = (
+            0 if notes_from_stdin else getattr(args, "notes_fd", None)
+        )
+        if password_source_fd is not None and password_source_fd == notes_source_fd:
+            print(
+                C.red("Use different input sources for password and notes."),
+                file=sys.stderr,
+            )
+            return 2
+        if notes_from_stdin and not (as_note or has_secret_source or uses_generation):
+            print(
+                C.red(
+                    "--notes-stdin requires --gen, --preset, or a separate "
+                    "password input source."
+                ),
+                file=sys.stderr,
+            )
+            return 2
 
     if args.clipboard_timeout is not None:
         set_clipboard_timeout(args.clipboard_timeout)
@@ -1771,7 +1967,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "add":
             gen = bool(getattr(args, "gen", False))
             preset = getattr(args, "preset", None)
-            password = getattr(args, "password", None)
+            try:
+                password = read_secret_option(args, "password")
+                notes = read_secret_option(args, "notes")
+            except ValueError as exc:
+                print(C.red(str(exc)), file=sys.stderr)
+                return 2
             if preset and not password:
                 gen = True
                 try:
@@ -1780,7 +1981,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(C.red(str(e)), file=sys.stderr)
                     return 1
                 # length from preset already applied; still pass flags
-            non_interactive = gen or bool(password)
+            non_interactive = gen or bool(password) or (
+                bool(getattr(args, "note", False)) and notes is not None
+            )
             cmd_add(
                 vault,
                 getattr(args, "name", None),
@@ -1791,12 +1994,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 avoid_ambiguous=bool(getattr(args, "avoid_ambiguous", False)),
                 username=getattr(args, "username", None),
                 url=getattr(args, "url", None),
-                notes=getattr(args, "notes", None),
+                notes=notes,
                 password=password,
                 non_interactive=non_interactive,
             )
         elif args.command == "add-note":
-            notes = getattr(args, "notes", None)
+            try:
+                notes = read_secret_option(args, "notes")
+            except ValueError as exc:
+                print(C.red(str(exc)), file=sys.stderr)
+                return 2
             cmd_add_note(
                 vault,
                 getattr(args, "name", None),
@@ -1873,4 +2080,3 @@ def main(argv: Optional[List[str]] = None) -> int:
         vault.lock()
 
     return exit_code
-
