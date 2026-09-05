@@ -2,13 +2,21 @@ name: CI
 
 on:
   push:
-    branches: [main, master, "feat/**"]
+    branches: [main, master, "feat/**", "codex/**"]
   pull_request:
     branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

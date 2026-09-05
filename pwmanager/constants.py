@@ -27,6 +27,9 @@ SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?/"
 
 # Audit thresholds
 WEAK_ENTROPY_BITS = 50.0
+# Hard floor for master passwords; values below this are predictably weak and
+# cannot be accepted via an override prompt.
+MIN_MASTER_PASSWORD_ENTROPY_BITS = 28.0
 # Default rotation window when Entry.rotate_after_days is None (v2.3+)
 ROTATE_DEFAULT_DAYS = 90
 # Alias kept for older imports / docs
