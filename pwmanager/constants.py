@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import os
 
-VAULT_VERSION = 2
+VAULT_VERSION = 3
+CIPHER_FERNET = "fernet"
+CIPHER_AESGCM = "aes256gcm"
+CURRENT_CIPHER = CIPHER_AESGCM
+GCM_NONCE_SIZE = 12
+INNER_FORMAT = "pwmanager-inner-v1"
 DEFAULT_VAULT_PATH = os.path.join(os.getcwd(), "vault.json")
 
 # Argon2id parameters (sensible defaults — adjust higher for slower/stronger)

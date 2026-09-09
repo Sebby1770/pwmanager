@@ -20,6 +20,7 @@ from pwmanager.audit import audit_vault, health_score_color, print_audit_report
 from pwmanager.colors import C
 from pwmanager.constants import (
     AUTOLOCK_SECONDS,
+    CIPHER_FERNET,
     CLIPBOARD_CLEAR_SECONDS,
     MAX_UNLOCK_ATTEMPTS,
     SYMBOLS,
@@ -874,7 +875,7 @@ def cmd_delete(vault: Vault, name: Optional[str] = None) -> None:
     if not prompt_yn(f"Really delete '{name}'?"):
         return
     vault.delete(name)
-    print(C.green(f"Deleted '{name}'.\n"))
+    print(C.green(f"Deleted '{name}'. Undo with undelete before the next delete.\n"))
 
 
 def cmd_generate() -> None:
@@ -1028,14 +1029,18 @@ def cmd_import_csv(
 
 
 def cmd_change_master(vault: Vault) -> None:
-    print(C.yellow("Changing master password will re-encrypt the vault."))
+    print(C.yellow("Changing master password will re-encrypt the vault in place."))
     current = prompt_secret("Current master password")
     try:
-        with open(vault.path) as f:
+        with open(vault.path, encoding="utf-8") as f:
             payload = json.load(f)
         salt = base64.b64decode(payload["salt"])
         key, _ = derive_key(current, salt, payload.get("kdf", "pbkdf2"))
-        decrypt_bytes(payload["vault"].encode("ascii"), key)
+        decrypt_bytes(
+            payload["vault"].encode("ascii"),
+            key,
+            payload.get("cipher", CIPHER_FERNET),
+        )
     except (InvalidToken, ValueError, FileNotFoundError, KeyError):
         print(C.red("Wrong password.\n"))
         return
@@ -1049,12 +1054,36 @@ def cmd_change_master(vault: Vault) -> None:
         print(C.red("Passwords don't match.\n"))
         return
 
-    entries_backup = vault.entries.copy()
-    os.remove(vault.path)
-    vault.create(new1)
-    vault.entries = entries_backup
-    vault.save()
+    vault.change_master(new1)
     print(C.green("Master password changed.\n"))
+
+
+def cmd_rename(vault: Vault, old: Optional[str] = None, new: Optional[str] = None) -> None:
+    if not old:
+        old = prompt("Entry to rename")
+    if not old:
+        return
+    if old not in vault.entries:
+        print(C.red(f"No entry named '{old}'.\n"))
+        return
+    if not new:
+        new = prompt("New name")
+    if not new:
+        return
+    try:
+        vault.rename(old, new)
+    except ValueError as e:
+        print(C.red(f"{e}\n"))
+        return
+    print(C.green(f"Renamed '{old}' → '{new}'.\n"))
+
+
+def cmd_undelete(vault: Vault) -> None:
+    name = vault.undelete()
+    if not name:
+        print(C.dim("Nothing to undelete.\n"))
+        return
+    print(C.green(f"Restored '{name}'.\n"))
 
 
 def cmd_audit(vault: Vault, *, check_hibp: bool = False) -> None:
@@ -1362,7 +1391,7 @@ MENU = f"""
   {C.cyan('2')}  view        view / list entries
   {C.cyan('3')}  search      search entries (exact + fuzzy)
   {C.cyan('4')}  edit        edit entry
-  {C.cyan('5')}  delete      delete entry
+  {C.cyan('5')}  delete      delete entry (undo with undelete)
   {C.cyan('6')}  generate    generate password / passphrase
   {C.cyan('7')}  export      encrypted export
   {C.cyan('8')}  import      encrypted import
@@ -1383,6 +1412,8 @@ MENU = f"""
   {C.cyan('p')}  pin         pin entry as favorite
   {C.cyan('u')}  unpin       unpin favorite
   {C.cyan('s')}  stats       vault statistics
+  {C.cyan('m')}  rename      rename entry
+  {C.cyan('z')}  undelete    restore last deleted entry
   {C.cyan('l')}  lock        lock vault
   {C.cyan('q')}  quit
 """
@@ -1469,6 +1500,10 @@ def interactive(vault: Vault, *, password_env: bool = False) -> None:
                 cmd_unpin(vault)
             elif choice in ("s", "stats"):
                 cmd_stats(vault)
+            elif choice in ("m", "rename"):
+                cmd_rename(vault)
+            elif choice in ("z", "undelete"):
+                cmd_undelete(vault)
             elif choice in ("l", "lock"):
                 clear_screen()
                 vault.lock()
@@ -1674,6 +1709,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("import")
     sub.add_parser("master")
+    rn = sub.add_parser("rename", help="Rename an entry")
+    rn.add_argument("old")
+    rn.add_argument("new")
+    sub.add_parser("undelete", help="Restore the last deleted entry")
 
     audit_p = sub.add_parser("audit", help="Run vault security audit")
     audit_p.add_argument(
@@ -1860,6 +1899,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_edit(vault, getattr(args, "name", None))
         elif args.command == "delete":
             cmd_delete(vault, getattr(args, "name", None))
+        elif args.command == "rename":
+            cmd_rename(vault, args.old, args.new)
+        elif args.command == "undelete":
+            cmd_undelete(vault)
         elif args.command == "pin":
             cmd_pin(vault, getattr(args, "name", None))
         elif args.command == "unpin":

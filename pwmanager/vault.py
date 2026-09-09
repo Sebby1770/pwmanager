@@ -12,7 +12,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import InvalidToken
 
-from pwmanager.constants import AUTOLOCK_SECONDS, DEFAULT_VAULT_PATH, VAULT_VERSION
+from pwmanager.constants import (
+    AUTOLOCK_SECONDS,
+    CIPHER_FERNET,
+    CURRENT_CIPHER,
+    DEFAULT_VAULT_PATH,
+    INNER_FORMAT,
+    VAULT_VERSION,
+)
 from pwmanager.crypto import (
     decrypt_bytes,
     derive_key,
@@ -44,6 +51,8 @@ class Vault:
         self.key: Optional[bytes] = None
         self.entries: Dict[str, Entry] = {}
         self.kdf_used: str = ""
+        self.cipher: str = CURRENT_CIPHER
+        self._trash: Optional[Tuple[str, Entry]] = None
         self.last_activity: float = time.time()
         self.lock_timeout: int = (
             int(lock_timeout) if lock_timeout is not None else AUTOLOCK_SECONDS
@@ -54,21 +63,53 @@ class Vault:
     def exists(self) -> bool:
         return os.path.exists(self.path)
 
-    def create(self, master_password: str, kdf: str = "auto") -> None:
-        salt = generate_salt()
-        key, kdf_used = derive_key(master_password, salt, kdf)
-        ciphertext = encrypt_bytes(json.dumps({}).encode("utf-8"), key)
+    def _pack_inner(self) -> bytes:
+        trash = None
+        if self._trash:
+            trash = {"name": self._trash[0], "entry": self._trash[1].to_dict()}
+        return json.dumps(
+            {
+                "_format": INNER_FORMAT,
+                "entries": {name: e.to_dict() for name, e in self.entries.items()},
+                "trash": trash,
+            }
+        ).encode("utf-8")
+
+    def _unpack_inner(self, raw: Any) -> None:
+        if isinstance(raw, dict) and raw.get("_format") == INNER_FORMAT:
+            entries_raw = raw.get("entries") or {}
+            trash_raw = raw.get("trash")
+        elif isinstance(raw, dict):
+            entries_raw = raw
+            trash_raw = None
+        else:
+            raise ValueError("Vault payload is not a JSON object.")
+        self.entries = {name: Entry.from_dict(d) for name, d in entries_raw.items()}
+        self._trash = None
+        if isinstance(trash_raw, dict) and "name" in trash_raw and "entry" in trash_raw:
+            self._trash = (str(trash_raw["name"]), Entry.from_dict(trash_raw["entry"]))
+
+    def _build_payload(self, key: bytes, kdf_used: str, salt: bytes, cipher: str) -> dict:
         payload = {
             "version": VAULT_VERSION,
             "kdf": kdf_used,
+            "cipher": cipher,
             "salt": base64.b64encode(salt).decode("ascii"),
-            "vault": ciphertext.decode("ascii"),
+            "vault": encrypt_bytes(self._pack_inner(), key, cipher).decode("ascii"),
         }
         payload["hmac"] = file_hmac(payload, key)
+        return payload
+
+    def create(self, master_password: str, kdf: str = "auto") -> None:
+        salt = generate_salt()
+        key, kdf_used = derive_key(master_password, salt, kdf)
+        self.entries = {}
+        self._trash = None
+        payload = self._build_payload(key, kdf_used, salt, CURRENT_CIPHER)
         self._write(payload)
         self.key = key
         self.kdf_used = kdf_used
-        self.entries = {}
+        self.cipher = CURRENT_CIPHER
         self.last_activity = time.time()
 
     def unlock(self, master_password: str) -> None:
@@ -88,15 +129,16 @@ class Vault:
             raise ValueError(f"Vault file missing field: {e}") from e
 
         key, _ = derive_key(master_password, salt, kdf)
+        cipher = payload.get("cipher", CIPHER_FERNET)
 
         # Decrypt first. A failure here means the password was wrong, which is
         # by far the common case and must not be reported as tampering.
-        plaintext = decrypt_bytes(token, key)  # raises InvalidToken on bad password
+        plaintext = decrypt_bytes(token, key, cipher)
 
         # The password is now known to be correct, so a bad HMAC can only mean
-        # the file was edited. Fernet authenticates the ciphertext but not the
-        # surrounding JSON, so without this check an attacker with write access
-        # could alter the version or KDF fields undetected.
+        # the file was edited. Fernet/GCM authenticates the ciphertext but not
+        # the surrounding JSON, so without this check an attacker with write
+        # access could alter the version, KDF, or cipher fields undetected.
         if "hmac" in payload:
             if not verify_file_hmac(payload, key):
                 secure_wipe(bytearray(key))
@@ -106,10 +148,10 @@ class Vault:
                     "Restore from a backup, or run `pwmanager verify` for detail."
                 )
 
-        raw = json.loads(plaintext.decode("utf-8"))
-        self.entries = {name: Entry.from_dict(d) for name, d in raw.items()}
+        self._unpack_inner(json.loads(plaintext.decode("utf-8")))
         self.key = key
         self.kdf_used = kdf
+        self.cipher = cipher
         self.last_activity = time.time()
 
     def save(self) -> None:
@@ -134,16 +176,30 @@ class Vault:
             raise RuntimeError(
                 f"Vault file is missing its salt: {self.path}. Refusing to overwrite."
             )
-        raw = {name: e.to_dict() for name, e in self.entries.items()}
-        ciphertext = encrypt_bytes(json.dumps(raw).encode("utf-8"), self.key)
-        payload["vault"] = ciphertext.decode("ascii")
-        payload["version"] = VAULT_VERSION
-        payload["hmac"] = file_hmac(payload, self.key)
+        salt = base64.b64decode(payload["salt"])
+        new_payload = self._build_payload(self.key, self.kdf_used, salt, CURRENT_CIPHER)
+        self._write(new_payload)
+        self.cipher = CURRENT_CIPHER
+        self.last_activity = time.time()
+
+    def change_master(self, new_password: str, kdf: str = "auto") -> None:
+        """Re-encrypt with a new salt and key without deleting the old file first."""
+        if self.key is None:
+            raise RuntimeError("Vault is locked")
+        salt = generate_salt()
+        key, kdf_used = derive_key(new_password, salt, kdf)
+        payload = self._build_payload(key, kdf_used, salt, CURRENT_CIPHER)
         self._write(payload)
+        if isinstance(self.key, (bytes, bytearray)):
+            secure_wipe(self.key)
+        self.key = key
+        self.kdf_used = kdf_used
+        self.cipher = CURRENT_CIPHER
         self.last_activity = time.time()
 
     def lock(self) -> None:
         self.entries.clear()
+        self._trash = None
         if isinstance(self.key, (bytes, bytearray)):
             secure_wipe(self.key)
         self.key = None
@@ -220,7 +276,28 @@ class Vault:
         self.save()
 
     def delete(self, name: str) -> None:
+        self._trash = (name, self.entries[name])
         del self.entries[name]
+        self.save()
+
+    def undelete(self) -> Optional[str]:
+        if not self._trash:
+            return None
+        name, entry = self._trash
+        if name in self.entries:
+            return None
+        self.entries[name] = entry
+        self._trash = None
+        self.save()
+        return name
+
+    def rename(self, old: str, new: str) -> None:
+        if old not in self.entries:
+            raise KeyError(old)
+        if new in self.entries:
+            raise ValueError(f"'{new}' already exists")
+        self.entries[new] = self.entries.pop(old)
+        self.entries[new].updated_at = time.time()
         self.save()
 
     def pin(self, name: str) -> None:
@@ -286,7 +363,11 @@ class Vault:
 
         # Also confirm ciphertext still decrypts with current key
         try:
-            decrypt_bytes(payload["vault"].encode("ascii"), self.key)
+            decrypt_bytes(
+                payload["vault"].encode("ascii"),
+                self.key,
+                payload.get("cipher", CIPHER_FERNET),
+            )
         except InvalidToken:
             return False, "Ciphertext failed to decrypt"
 
@@ -372,29 +453,36 @@ class Vault:
     def export_encrypted(self, out_path: str, password: str) -> None:
         salt = generate_salt()
         key, kdf_used = derive_key(password, salt)
-        raw = {name: e.to_dict() for name, e in self.entries.items()}
-        ct = encrypt_bytes(json.dumps(raw).encode("utf-8"), key)
         payload = {
             "version": VAULT_VERSION,
             "kdf": kdf_used,
+            "cipher": CURRENT_CIPHER,
             "salt": base64.b64encode(salt).decode("ascii"),
-            "vault": ct.decode("ascii"),
+            "vault": encrypt_bytes(self._pack_inner(), key, CURRENT_CIPHER).decode("ascii"),
             "exported_at": time.time(),
         }
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        payload["hmac"] = file_hmac(payload, key)
+        dest = Vault(out_path)
+        dest._write(payload)
 
     def import_encrypted(self, in_path: str, password: str, merge: bool = True) -> int:
         with open(in_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         salt = base64.b64decode(payload["salt"])
         key, _ = derive_key(password, salt, payload.get("kdf", "pbkdf2"))
-        plaintext = decrypt_bytes(payload["vault"].encode("ascii"), key)
+        cipher = payload.get("cipher", CIPHER_FERNET)
+        plaintext = decrypt_bytes(payload["vault"].encode("ascii"), key, cipher)
+        if "hmac" in payload and not verify_file_hmac(payload, key):
+            raise ValueError("Import file failed integrity check.")
         raw = json.loads(plaintext.decode("utf-8"))
+        if isinstance(raw, dict) and raw.get("_format") == INNER_FORMAT:
+            incoming = raw.get("entries") or {}
+        else:
+            incoming = raw
         if not merge:
             self.entries.clear()
         added = 0
-        for name, d in raw.items():
+        for name, d in incoming.items():
             self.entries[name] = Entry.from_dict(d)
             added += 1
         self.save()

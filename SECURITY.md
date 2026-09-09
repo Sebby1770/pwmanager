@@ -47,21 +47,23 @@ Derived key is urlsafe-base64-encoded for Fernet.
 
 ### Encryption & integrity
 
-- **Fernet** (AES-128-CBC + HMAC-SHA256) encrypts the JSON map of entries.
-- A separate **HMAC-SHA256** over `salt|vault` (using the derived key) detects
-  tampering of the on-disk wrapper. Wrong master password and tampering both
-  surface as decryption failure (`InvalidToken`).
+- **AES-256-GCM** encrypts new vaults. Older **Fernet** (AES-128-CBC + HMAC-SHA256)
+  files still unlock and are rewritten as GCM on the next save.
+- A separate **HMAC-SHA256** over version, KDF, cipher, salt, and ciphertext
+  detects wrapper tampering. A wrong master password is `InvalidToken`; a
+  successful decrypt plus a bad HMAC is `VaultIntegrityError`.
 - **`pwmanager verify`** re-reads the vault file, recomputes the HMAC, and
   confirms the ciphertext still decrypts — without listing entry contents.
 
-### Vault file format (v2)
+### Vault file format (v3)
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "kdf": "argon2id",
+  "cipher": "aes256gcm",
   "salt": "<base64>",
-  "vault": "<Fernet token>",
+  "vault": "<base64 nonce || ciphertext || tag>",
   "hmac": "<hex sha256>"
 }
 ```

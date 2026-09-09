@@ -112,7 +112,7 @@ def test_file_hmac_covers_version_and_kdf(tmp_path):
     base = {"version": 2, "kdf": "pbkdf2", "salt": "c2FsdA==", "vault": "ciphertext"}
     baseline = file_hmac(base, key)
 
-    for field, value in (("version", 3), ("kdf", "argon2id"), ("salt", "b3RoZXI=")):
+    for field, value in (("version", 3), ("kdf", "argon2id"), ("salt", "b3RoZXI="), ("cipher", "aes256gcm")):
         changed = dict(base, **{field: value})
         assert file_hmac(changed, key) != baseline, f"{field} is not authenticated"
 

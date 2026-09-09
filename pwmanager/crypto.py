@@ -8,14 +8,20 @@ import hmac
 import os
 from typing import Any, Tuple
 
-from cryptography.fernet import Fernet
+from cryptography.exceptions import InvalidTag
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from pwmanager.constants import (
     ARGON2_MEMORY_COST,
     ARGON2_PARALLELISM,
     ARGON2_TIME_COST,
+    CIPHER_AESGCM,
+    CIPHER_FERNET,
+    CURRENT_CIPHER,
+    GCM_NONCE_SIZE,
     KEY_SIZE,
     PBKDF2_ITERATIONS,
     SALT_SIZE,
@@ -76,33 +82,68 @@ def derive_key(master_password: str, salt: bytes, kdf: str = "auto") -> Tuple[by
     return base64.urlsafe_b64encode(raw), kdf
 
 
-def encrypt_bytes(data: bytes, key: bytes) -> bytes:
-    return Fernet(key).encrypt(data)
+def _raw_key(key: bytes) -> bytes:
+    """32-byte key inside the Fernet-compatible urlsafe-b64 wrapper."""
+    return base64.urlsafe_b64decode(key)
 
 
-def decrypt_bytes(token: bytes, key: bytes) -> bytes:
-    return Fernet(key).decrypt(token)
+def encrypt_bytes(data: bytes, key: bytes, cipher: str = CURRENT_CIPHER) -> bytes:
+    if cipher == CIPHER_FERNET:
+        return Fernet(key).encrypt(data)
+    if cipher == CIPHER_AESGCM:
+        nonce = os.urandom(GCM_NONCE_SIZE)
+        ct = AESGCM(_raw_key(key)).encrypt(nonce, data, None)
+        return base64.urlsafe_b64encode(nonce + ct)
+    raise ValueError(f"Unknown cipher: {cipher}")
+
+
+def decrypt_bytes(token: bytes, key: bytes, cipher: str = CURRENT_CIPHER) -> bytes:
+    try:
+        if cipher == CIPHER_FERNET:
+            return Fernet(key).decrypt(token)
+        if cipher == CIPHER_AESGCM:
+            blob = base64.urlsafe_b64decode(token)
+            if len(blob) < GCM_NONCE_SIZE + 16:
+                raise InvalidToken("ciphertext too short")
+            nonce, ct = blob[:GCM_NONCE_SIZE], blob[GCM_NONCE_SIZE:]
+            return AESGCM(_raw_key(key)).decrypt(nonce, ct, None)
+        raise ValueError(f"Unknown cipher: {cipher}")
+    except (InvalidToken, InvalidTag, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("Unknown cipher"):
+            raise
+        raise InvalidToken("Decryption failed") from exc
+
+
+def _signed_message(tag: str, parts: list[str]) -> bytes:
+    return "|".join(f"{len(p)}:{p}" for p in [tag, *parts]).encode("utf-8")
 
 
 def file_hmac(payload: dict, key: bytes) -> str:
     """HMAC over every unencrypted vault field, for tamper detection.
 
-    Fernet authenticates the ciphertext but nothing around it, so the plain
-    JSON fields need their own MAC. Covering ``version`` and ``kdf`` as well as
-    ``salt`` means an edit to any of them is reported as tampering instead of
-    surfacing as a confusing "wrong password".
-
     Domain-separated with a version tag and length prefixes so no two distinct
-    payloads can produce the same signed message.
+    payloads can produce the same signed message. v3 also authenticates cipher.
     """
     parts = [
-        "pwmanager-vault-hmac-v2",
+        str(payload.get("version", "")),
+        str(payload.get("kdf", "")),
+        str(payload.get("cipher", CIPHER_FERNET)),
+        payload["salt"],
+        payload["vault"],
+    ]
+    msg = _signed_message("pwmanager-vault-hmac-v3", parts)
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def file_hmac_v2(payload: dict, key: bytes) -> str:
+    """2.4 MAC: version, kdf, salt, vault. No cipher field yet."""
+    parts = [
         str(payload.get("version", "")),
         str(payload.get("kdf", "")),
         payload["salt"],
         payload["vault"],
     ]
-    msg = "|".join(f"{len(p)}:{p}" for p in parts).encode("utf-8")
+    msg = _signed_message("pwmanager-vault-hmac-v2", parts)
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
@@ -117,11 +158,12 @@ def legacy_file_hmac(payload: dict, key: bytes) -> str:
 
 
 def verify_file_hmac(payload: dict, key: bytes) -> bool:
-    """Constant-time check of a stored HMAC against the current or legacy form."""
+    """Constant-time check of a stored HMAC against current, 2.4, or legacy form."""
     stored = payload.get("hmac")
     if not isinstance(stored, str):
         return False
-    # Both comparisons always run so the result does not leak which form matched.
+    # All comparisons always run so the result does not leak which form matched.
     current = hmac.compare_digest(file_hmac(payload, key), stored)
+    v2 = hmac.compare_digest(file_hmac_v2(payload, key), stored)
     legacy = hmac.compare_digest(legacy_file_hmac(payload, key), stored)
-    return current or legacy
+    return current or v2 or legacy

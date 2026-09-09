@@ -1,8 +1,10 @@
-# pwmanager 2.4
+# pwmanager 2.5
 
 Local encrypted password manager with TOTP watch, HIBP breach checks, rotation reminders, secure notes, vault profiles, favorites, fuzzy search, CSV/JSON import/export, `get --copy` scripting, `doctor` self-test, and a colorized CLI. No cloud, no accounts — your vault stays on your machine.
 
-**New in 2.4:** a [web generator](https://sebby1770.github.io/pwmanager/) — the same password and passphrase logic, running entirely in your browser. See [web/](web/).
+**New in 2.5:** AES-256-GCM for new vaults, atomic master-password change, rename, and undelete. Fernet vaults still unlock and migrate on save.
+
+**2.4:** a [web generator](https://sebby1770.github.io/pwmanager/) — the same password and passphrase logic, running entirely in your browser. See [web/](web/).
 
 ## Highlights
 
@@ -11,7 +13,7 @@ Local encrypted password manager with TOTP watch, HIBP breach checks, rotation r
 - **Owner-only vault files** — written `0600` atomically with `fsync`, never through the process umask
 - **Honest passphrase strength** — scored by words, not characters (a 5-word phrase is ~55 bits, not ~150)
 - **Strong KDF** — Argon2id by default (PBKDF2-HMAC-SHA256 fallback)
-- **Authenticated encryption** — Fernet (AES-128-CBC + HMAC-SHA256) plus file-level HMAC
+- **Authenticated encryption** — AES-256-GCM for new vaults; Fernet still unlocks older files. File-level HMAC covers version, KDF, cipher, salt, and ciphertext.
 - **Rotation reminders** — per-entry `rotate_after_days` (default 90); `touch NAME` after you rotate
 - **get / clipboard one-shot** — `get NAME --copy password|username|totp|url` for scripts
 - **Integrity verify** — `verify` recomputes HMAC without listing secrets
@@ -219,19 +221,20 @@ Default path: `vault.json` in the current working directory (or profile path).
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "kdf": "argon2id",
+  "cipher": "aes256gcm",
   "salt": "<base64 salt>",
-  "vault": "<Fernet token>",
-  "hmac": "<sha256 hmac over version+kdf+salt+vault>"
+  "vault": "<base64 nonce || ciphertext || tag>",
+  "hmac": "<sha256 hmac over version+kdf+cipher+salt+vault>"
 }
 ```
 
-Since 2.4 the HMAC covers the `version` and `kdf` fields as well, so editing
-them is detected rather than surfacing as a confusing "wrong password". Vaults
-carrying the older salt+ciphertext HMAC still open, and are upgraded on the
-next save. The file itself is written `0600`; run `pwmanager doctor` to check
-an existing vault's permissions.
+Since 2.4 the HMAC covers the `version` and `kdf` fields as well; 2.5 also
+covers `cipher`. Editing those is detected rather than surfacing as a confusing
+"wrong password". Older HMAC forms still open and are upgraded on the next
+save. The file itself is written `0600`; run `pwmanager doctor` to check an
+existing vault's permissions.
 
 **Backward compatible** with earlier vaults. New entry fields default when missing:
 

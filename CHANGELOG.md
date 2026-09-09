@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.5.0
+
+### Added
+
+- AES-256-GCM for new vaults. Fernet files still unlock and migrate on the next
+  save. The wrapper HMAC is now v3 and also covers the `cipher` field.
+- Atomic master-password change: new salt and key are written via rename, so a
+  crash cannot leave the vault deleted.
+- One-slot trash inside the encrypted payload (`undelete` / `z`) so a delete
+  survives a process restart until the next delete.
+- `rename` / `m` to rename an entry.
+
+### Changed
+
+- Encrypted export/import use the same v3 wrapper (cipher + HMAC) as the vault.
+- CI runs Python 3.13 as well as 3.11 and 3.12.
+
 ## 2.4.0
 
 ### Added
