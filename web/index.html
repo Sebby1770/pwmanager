@@ -3,205 +3,204 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pwmanager — password generator</title>
-<meta name="description" content="A password and passphrase generator that runs entirely in your browser. Nothing you generate is uploaded, logged, or stored.">
-<meta name="color-scheme" content="light dark">
+<title>pwmanager — a vault that never sees your secrets</title>
+<meta name="description" content="Zero-knowledge password manager. Encryption happens in your browser. The operator never receives your master password, vault key, or card numbers.">
+<meta name="color-scheme" content="dark light">
 <meta name="referrer" content="no-referrer">
-<!--
-  Content-Security-Policy is deliberately tight: no inline script, no remote
-  script, and the only network destination allowed is the HIBP range API,
-  which is contacted only when you click "Check breaches".
--->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.pwnedpasswords.com; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%94%91%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="styles.css">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
 </head>
 <body>
-<a class="skip-link" href="#generator">Skip to generator</a>
-
-<header class="site-header">
-  <div class="wrap header-inner">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">pw</span>
-      <div>
-        <h1>pwmanager</h1>
-        <p class="tagline">Password generator that never leaves your browser</p>
-      </div>
-    </div>
-    <div class="header-actions">
-      <button id="theme-toggle" type="button" class="ghost" aria-pressed="false">Dark</button>
-      <a class="ghost" href="https://github.com/Sebby1770/pwmanager">Source</a>
-    </div>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./" aria-current="page">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M10.5 14.2V11.4a5.5 5.5 0 1 1 11 0v2.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        <rect x="8.5" y="14" width="15" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <circle cx="16" cy="19.6" r="1.55" fill="currentColor"/>
+      </svg>
+      <span class="brand-name">pwmanager</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="vault.html">Vault</a>
+      <a href="generator.html">Generator</a>
+      <a href="pricing.html">Pricing</a>
+      <a href="security.html">Security</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
   </div>
 </header>
 
-<main class="wrap">
-
-  <section class="card generator" id="generator" aria-labelledby="generator-heading">
-    <h2 id="generator-heading" class="visually-hidden">Generate a password</h2>
-
-    <div class="output-block">
-      <output id="secret" class="secret" for="length words" aria-live="polite" tabindex="0">&nbsp;</output>
-      <div class="output-actions">
-        <button id="regenerate" type="button" class="primary">Regenerate</button>
-        <button id="copy" type="button">Copy</button>
-        <button id="reveal" type="button" class="ghost" aria-pressed="true">Hide</button>
+<main id="main">
+  <section class="hero wrap">
+    <div>
+      <p class="kicker">Zero-knowledge · Victoria, Australia</p>
+      <h1>A vault that never sees your secrets.</h1>
+      <p class="lede">
+        Entries are sealed in your browser with AES-GCM before anything optional is synced.
+        There is no recovery desk, because there is nothing here to recover. Quiet, local-first, honest about its limits.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-brass" href="vault.html">Open the vault</a>
+        <a class="btn btn-ghost" href="generator.html">Generate a password</a>
       </div>
-      <p id="copy-status" class="copy-status" role="status"></p>
+      <ul class="kbd-list">
+        <li>AES-GCM in the tab</li>
+        <li>Stripe never shares PAN</li>
+        <li>Forgotten password = gone</li>
+      </ul>
+      <p class="fine">Free on this device. Pro adds encrypted cloud sync via Stripe Checkout. Not a bank, not a substitute for 1Password, Bitwarden, or KeePassXC for high-stakes enterprise use.</p>
     </div>
-
-    <div class="strength" aria-live="polite">
-      <div class="meter" role="img" aria-labelledby="strength-text">
-        <span class="meter-fill" id="meter-fill" data-level="0"></span>
-      </div>
-      <p class="strength-text" id="strength-text">—</p>
-      <dl class="strength-facts">
-        <div><dt>Entropy</dt><dd id="fact-entropy">—</dd></div>
-        <div><dt>Alphabet</dt><dd id="fact-alphabet">—</dd></div>
-        <div><dt>Offline cracking</dt><dd id="fact-crack">—</dd></div>
-      </dl>
-      <p class="fine-print" id="model-note"></p>
-    </div>
-
-    <div class="tabs" role="tablist" aria-label="Generator mode">
-      <button role="tab" id="tab-password" aria-controls="panel-password" aria-selected="true" class="tab">Password</button>
-      <button role="tab" id="tab-passphrase" aria-controls="panel-passphrase" aria-selected="false" class="tab" tabindex="-1">Passphrase</button>
-    </div>
-
-    <div role="tabpanel" id="panel-password" aria-labelledby="tab-password" class="panel">
-      <div class="presets" role="group" aria-label="Presets">
-        <button type="button" class="chip" data-preset="pin">PIN</button>
-        <button type="button" class="chip" data-preset="wifi">Wi-Fi</button>
-        <button type="button" class="chip" data-preset="apple">Strong</button>
-        <button type="button" class="chip" data-preset="max">Maximum</button>
-      </div>
-      <p class="preset-hint" id="preset-hint">Presets match <code>pwmanager gen --preset</code>.</p>
-
-      <div class="field">
-        <label for="length">Length <output id="length-value" for="length">20</output></label>
-        <input type="range" id="length" min="4" max="128" step="1" value="20">
-      </div>
-
-      <fieldset class="field toggles">
-        <legend>Character classes</legend>
-        <label class="check"><input type="checkbox" id="use-lower" checked> Lowercase <span class="sample">a–z</span></label>
-        <label class="check"><input type="checkbox" id="use-upper" checked> Uppercase <span class="sample">A–Z</span></label>
-        <label class="check"><input type="checkbox" id="use-digits" checked> Digits <span class="sample">0–9</span></label>
-        <label class="check"><input type="checkbox" id="use-symbols" checked> Symbols <span class="sample" id="symbol-sample"></span></label>
-        <label class="check"><input type="checkbox" id="avoid-ambiguous"> Avoid lookalikes <span class="sample">I l 1 O 0</span></label>
-      </fieldset>
-
-      <div class="field">
-        <label for="exclude">Also exclude these characters</label>
-        <input type="text" id="exclude" placeholder="e.g. &lt;&gt;&amp;" autocomplete="off" spellcheck="false">
-      </div>
-    </div>
-
-    <div role="tabpanel" id="panel-passphrase" aria-labelledby="tab-passphrase" class="panel" hidden>
-      <div class="field">
-        <label for="words">Words <output id="words-value" for="words">5</output></label>
-        <input type="range" id="words" min="3" max="12" step="1" value="5">
-      </div>
-      <div class="field">
-        <label for="separator">Separator</label>
-        <select id="separator">
-          <option value="-">hyphen -</option>
-          <option value=".">dot .</option>
-          <option value="_">underscore _</option>
-          <option value=" ">space</option>
-          <option value="">none</option>
-        </select>
-      </div>
-      <fieldset class="field toggles">
-        <legend>Extras</legend>
-        <label class="check"><input type="checkbox" id="capitalize"> Capitalise words</label>
-        <label class="check"><input type="checkbox" id="add-number"> Add a digit</label>
-        <label class="check"><input type="checkbox" id="add-symbol"> Add a symbol</label>
-      </fieldset>
-      <p class="fine-print">Words are drawn from the same <span id="wordlist-size">—</span>-word EFF list the CLI uses, sampled with replacement so the entropy figure above is exact.</p>
-    </div>
-
-    <div class="cli-hint">
-      <span class="cli-label">Same policy from the terminal</span>
-      <code id="cli-command">pwmanager gen --length 20</code>
-      <button type="button" id="copy-cli" class="ghost small">Copy</button>
+    <div class="vault-rose" aria-hidden="true">
+      <span class="bolt bolt-n"></span>
+      <span class="bolt bolt-e"></span>
+      <span class="bolt bolt-s"></span>
+      <span class="bolt bolt-w"></span>
     </div>
   </section>
 
-  <section class="card" aria-labelledby="batch-heading">
-    <h2 id="batch-heading">Generate a batch</h2>
-    <p class="section-lede">Useful when you are rotating several accounts at once. The list lives in this tab only — reloading the page discards it.</p>
-    <div class="batch-controls">
-      <label for="batch-count">How many</label>
-      <input type="number" id="batch-count" min="1" max="100" value="10" inputmode="numeric">
-      <button type="button" id="batch-generate">Generate</button>
-      <button type="button" id="batch-copy" class="ghost" disabled>Copy all</button>
-      <button type="button" id="batch-clear" class="ghost" disabled>Clear</button>
+  <hr class="gold-rule wrap">
+
+  <section class="section wrap" id="how">
+    <p class="kicker">How zero-knowledge works</p>
+    <h2>Two keys. One of them never leaves the room.</h2>
+    <p class="lede">From your email and master password the browser derives two 256-bit keys with PBKDF2-HMAC-SHA256 (600,000 iterations, SHA-256, 32-byte salt). The server can store a hash of the second key. It cannot invert the first.</p>
+    <ol class="steps">
+      <li>
+        <span class="num">01</span>
+        <h3>You invent the password</h3>
+        <p>The master password is typed into the page and used in WebCrypto. It is not posted, logged, or written into a URL.</p>
+      </li>
+      <li>
+        <span class="num">02</span>
+        <h3>vaultKey seals the JSON</h3>
+        <p>AES-GCM-256 encrypts names, passwords, notes, and TOTP secrets in the tab. IndexedDB keeps ciphertext only.</p>
+      </li>
+      <li>
+        <span class="num">03</span>
+        <h3>authKey proves who you are</h3>
+        <p>A second derived key is sent to register or sign in. The API hashes it again (Argon2id) and never sees vaultKey.</p>
+      </li>
+      <li>
+        <span class="num">04</span>
+        <h3>Pro stores an opaque blob</h3>
+        <p>Cloud sync uploads <code>{v, nonce, ct, kdf}</code>. A server compromise should not reveal vault plaintext.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="section wrap" id="features">
+    <p class="kicker">On the workbench</p>
+    <h2>What the vault actually does</h2>
+    <div class="feature-grid">
+      <article class="feature">
+        <h3>Local first</h3>
+        <p>Create a vault without an account. Ciphertext lives in this browser until you choose to sync.</p>
+      </article>
+      <article class="feature">
+        <h3>TOTP in the entry</h3>
+        <p>Store a base32 secret; live codes stay on the device. The server never receives them.</p>
+      </article>
+      <article class="feature">
+        <h3>Audit without exfil</h3>
+        <p>Weak, reused, and ageing passwords are scored in-page. Optional HIBP uses k-anonymity (five hex chars of SHA-1).</p>
+      </article>
+      <article class="feature">
+        <h3>Idle lock &amp; clipboard</h3>
+        <p>Five-minute idle lock. Copies wipe themselves after twenty seconds, matching the CLI.</p>
+      </article>
+      <article class="feature">
+        <h3>Encrypted export</h3>
+        <p>Download the same envelope the API would store. Restore needs the master password — there is no back door.</p>
+      </article>
+      <article class="feature">
+        <h3>CLI still here</h3>
+        <p>The original Argon2id/Fernet Python manager is unchanged. Same generator policy in the terminal and the browser.</p>
+      </article>
     </div>
-    <ol id="batch-list" class="batch-list" aria-live="polite"></ol>
   </section>
 
-  <section class="card" aria-labelledby="breach-heading">
-    <h2 id="breach-heading">Check against known breaches</h2>
-    <p class="section-lede">
-      This is the only feature that touches the network, and only when you press the button.
-      It uses the <a href="https://haveibeenpwned.com/API/v3#SearchingPwnedPasswordsByRange">Have I Been Pwned</a>
-      range API with k-anonymity: your browser sends the <strong>first five hex characters</strong> of the
-      password's SHA-1 hash and nothing else. The password itself, and the other 35 characters of the hash,
-      never leave this page. Freshly generated random passwords are effectively never in a breach corpus —
-      this is here for checking passwords you already use.
-    </p>
-    <div class="breach-controls">
-      <label for="breach-input">Password to check</label>
-      <input type="password" id="breach-input" autocomplete="off" spellcheck="false" placeholder="Paste a password to check">
-      <button type="button" id="breach-check">Check breaches</button>
-      <button type="button" id="breach-use-current" class="ghost">Use the one above</button>
+  <section class="section wrap" id="generator">
+    <div class="vitrine">
+      <div>
+        <p class="kicker">Same generator as the CLI</p>
+        <h2>A password that never leaves this machine.</h2>
+        <p class="lede">Rejection-sampled CSPRNG, shared symbol set, shared EFF wordlist, honest passphrase entropy. The generator page still talks to nobody except HIBP, and only if you click.</p>
+        <a class="btn btn-brass" href="generator.html">Open the generator</a>
+      </div>
+      <p class="specimen" aria-hidden="true">cinder·vault·brass·quiet·keel</p>
     </div>
-    <p id="breach-result" class="breach-result" role="status"></p>
   </section>
 
-  <section class="card" aria-labelledby="privacy-heading">
-    <h2 id="privacy-heading">What this page does and does not do</h2>
-    <ul class="facts">
-      <li><strong>Generation is local.</strong> Every password comes from your browser's <code>crypto.getRandomValues</code> CSPRNG, with rejection sampling so no character is more likely than another.</li>
-      <li><strong>Nothing is stored.</strong> No cookies, no analytics, no server. Only your interface preferences (theme, lengths, toggles) are saved to <code>localStorage</code> — never a generated secret.</li>
-      <li><strong>Nothing is uploaded.</strong> A Content-Security-Policy in the page blocks every outbound connection except the HIBP range endpoint above.</li>
-      <li><strong>It is a generator, not a vault.</strong> To store what you generate, use the CLI: <code>pip install -e ".[full]"</code>, then <code>pwmanager add NAME --gen</code>.</li>
-      <li><strong>Works offline.</strong> Save the page and it keeps working — the wordlist and all logic are bundled.</li>
-    </ul>
-    <p class="fine-print">
-      A generated password is only as safe as where it lands. Prefer pasting straight into a password manager
-      over retyping it, and close this tab when you are done.
-    </p>
+  <section class="section wrap" id="pricing">
+    <p class="kicker">Pricing</p>
+    <h2>Local is free. Sync is optional.</h2>
+    <div class="price-grid">
+      <article class="price-card">
+        <h3>Free</h3>
+        <p class="price">A$0 <span>/ forever</span></p>
+        <ul>
+          <li>Encrypted vault on this device</li>
+          <li>Generator, TOTP, audit, HIBP</li>
+          <li>Encrypted backup download</li>
+          <li>No account required</li>
+        </ul>
+        <a class="btn btn-ghost" href="vault.html">Create a local vault</a>
+      </article>
+      <article class="price-card is-featured">
+        <h3>Pro</h3>
+        <p class="price">A$4 <span>/ month or A$40 / year</span></p>
+        <ul>
+          <li>Encrypted cloud sync of ciphertext</li>
+          <li>Multi-device unlock with the same master password</li>
+          <li>Versioned blobs (last 20)</li>
+          <li>Up to 8&nbsp;MiB envelope (Free stays local)</li>
+        </ul>
+        <a class="btn btn-brass" href="pricing.html">Compare &amp; checkout</a>
+      </article>
+    </div>
+    <p class="fine">Paid through Stripe Checkout. pwmanager never sees full card numbers. Australian Consumer Law guarantees are not excluded.</p>
   </section>
 
-  <section class="card" aria-labelledby="cli-heading">
-    <h2 id="cli-heading">The CLI behind it</h2>
-    <p class="section-lede">This page shares its generator logic with the <code>pwmanager</code> command line tool — same alphabet, same presets, same wordlist, same entropy maths.</p>
-<pre class="code-block"><code>pip install -e ".[full]"
-
-pwmanager add github --gen           # creates the vault on first run
-pwmanager get github --copy password # copy, auto-clears after 20s
-pwmanager gen --length 20 --count 10 # the same generator, in bulk
-pwmanager audit --hibp               # reused / weak / breached check
-pwmanager doctor                     # self-test, incl. vault permissions</code></pre>
+  <section class="section wrap">
+    <div class="honest">
+      <p class="kicker">Limits, said plainly</p>
+      <h2>What this is not</h2>
+      <ul>
+        <li>Not SOC 2, ISO 27001, insured, or “unhackable”. It is an independent project by Sebby1770.</li>
+        <li>If you forget the master password, nobody can open the vault. That is the product, not a bug.</li>
+        <li>Malware, phishing, or a compromised device can still see secrets after unlock. See the <a href="security.html">threat model</a>.</li>
+        <li>Not a bank, not licensed financial advice, not an enterprise SSO vault.</li>
+      </ul>
+    </div>
   </section>
-
 </main>
 
 <footer class="site-footer">
-  <div class="wrap">
-    <p>MIT licensed · <a href="https://github.com/Sebby1770/pwmanager">github.com/Sebby1770/pwmanager</a></p>
-    <p class="fine-print">No warranty. Review the source before trusting it with anything that matters.</p>
+  <div class="wrap footer-grid">
+    <div>
+      <p><strong>pwmanager</strong> — an independent project by Sebby1770, Victoria, Australia.</p>
+      <p>Not a registered company disclosure; no ABN is claimed here. © <span id="year">2026</span></p>
+    </div>
+    <div class="footer-links">
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <a href="cookies.html">Cookies</a>
+      <a href="security.html">Security</a>
+    </div>
+    <div class="footer-links">
+      <a href="dpa.html">Data processing</a>
+      <a href="acceptable-use.html">Acceptable use</a>
+      <a href="https://github.com/Sebby1770/pwmanager">Source</a>
+      <a href="generator.html">Generator</a>
+    </div>
   </div>
 </footer>
-
-<noscript>
-  <p class="noscript">This generator needs JavaScript, because the passwords are created in your browser rather than on a server.</p>
-</noscript>
-
-<script src="wordlist.js"></script>
-<script src="generator.js"></script>
-<script src="app.js"></script>
+<noscript><p class="wrap fine">JavaScript is required because encryption happens in your browser, not on a server.</p></noscript>
+<script type="module" src="saas/shell.js"></script>
 </body>
 </html>

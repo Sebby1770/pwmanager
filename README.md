@@ -1,12 +1,56 @@
-# pwmanager 2.4
+# pwmanager 3.0
 
-Local encrypted password manager with TOTP watch, HIBP breach checks, rotation reminders, secure notes, vault profiles, favorites, fuzzy search, CSV/JSON import/export, `get --copy` scripting, `doctor` self-test, and a colorized CLI. No cloud, no accounts — your vault stays on your machine.
+Local encrypted password manager with TOTP watch, HIBP breach checks, rotation reminders, secure notes, vault profiles, favorites, fuzzy search, CSV/JSON import/export, `get --copy` scripting, `doctor` self-test, a colorized CLI, and an optional **zero-knowledge web vault**. The CLI still never requires an account. The website encrypts secrets in the browser; the operator cannot read them.
 
-**New in 2.4:** a [web generator](https://sebby1770.github.io/pwmanager/) — the same password and passphrase logic, running entirely in your browser. See [web/](web/).
+**Tagline:** a vault that never sees your secrets.
+
+**New in 3.0:** hosted SaaS UI + `saas/` API for encrypted cloud sync (Pro), while the static [generator](web/generator.html) stays local. See [SECURITY.md](SECURITY.md) for the cloud threat model.
+
+## SaaS (zero-knowledge web vault)
+
+The browser derives **two** keys from your email + master password with
+WebCrypto **PBKDF2-HMAC-SHA256** (600,000 iterations, SHA-256, 32-byte salt):
+
+1. **vaultKey** — AES-GCM-256, encrypts vault JSON in the tab, never uploaded
+2. **authKey** — sent to the API and hashed again (Argon2id). Used only to sign in
+
+IndexedDB stores ciphertext. Pro sync uploads `{v, nonce, ct, kdf}` only.
+
+```bash
+python saas/server.py
+# http://127.0.0.1:8787
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `PWMANAGER_DB` | SQLite path (default `pwmanager-saas.sqlite`) |
+| `PWMANAGER_HOST` / `PWMANAGER_PORT` | Bind address (default `127.0.0.1:8787`) |
+| `PWMANAGER_PUBLIC_URL` | Public origin for CORS and Stripe redirects |
+| `PWMANAGER_STRIPE_SECRET` | Stripe secret key (`sk_test_…` locally) |
+| `PWMANAGER_STRIPE_WEBHOOK_SECRET` | Webhook signing secret (`whsec_…`) |
+| `PWMANAGER_STRIPE_PRICE_MONTHLY` | Price id for A$4 / month |
+| `PWMANAGER_STRIPE_PRICE_YEARLY` | Price id for A$40 / year |
+| `PWMANAGER_SECURE_COOKIES` | `1` to add `Secure` on the session cookie |
+| `PWMANAGER_TRUST_PROXY` | `1` to honour `X-Forwarded-For` |
+
+If the Stripe variables are missing, `POST /api/checkout` returns **503 JSON**
+and nobody is marked Pro. Local webhook forwarding:
+
+```bash
+stripe listen --forward-to localhost:8787/api/stripe/webhook
+```
+
+Put TLS in front of the process in production. Details: [saas/README.md](saas/README.md),
+[web/README.md](web/README.md), legal pages under `web/*.html`.
+
+**Plans:** Free = local vault + generator. Pro = encrypted multi-device sync,
+versioned blobs (cap 20), 8&nbsp;MiB envelope. Forget the master password and
+the vault is gone — that is stated at signup, in Terms, Privacy, and Security.
 
 ## Highlights
 
-- **Web generator** — [static site](https://sebby1770.github.io/pwmanager/) sharing the CLI's presets, wordlist and entropy maths; nothing leaves the browser
+- **Zero-knowledge vault** — AES-GCM in the browser; server stores opaque blobs
+- **Web generator** — [static page](web/generator.html) sharing the CLI's presets, wordlist and entropy maths; nothing leaves the browser except an optional HIBP prefix
 - **Enforced integrity** — a vault edited outside pwmanager now refuses to unlock instead of silently opening
 - **Owner-only vault files** — written `0600` atomically with `fsync`, never through the process umask
 - **Honest passphrase strength** — scored by words, not characters (a 5-word phrase is ~55 bits, not ~150)
@@ -244,7 +288,7 @@ Other fields: `username`, `password`, `url`, `notes`, `tags`, `totp_secret`, `hi
 
 ```
 pwmanager/
-  __init__.py      # version 2.4.0
+  __init__.py      # version 3.1.0
   __main__.py
   crypto.py
   generators.py    # presets: pin|wifi|apple|max
@@ -261,8 +305,12 @@ pwmanager/
   constants.py
 scripts/
   build_web_wordlist.py   # regenerates web/wordlist.js from package data
-web/                      # static browser generator (GitHub Pages)
-  index.html styles.css app.js generator.js wordlist.js
+web/                      # SaaS UI + generator (GitHub Pages / local server)
+  index.html vault.html pricing.html generator.html
+  saas.css saas/*.js
+  privacy.html terms.html cookies.html security.html dpa.html acceptable-use.html
+saas/                     # stdlib HTTP API (ciphertext only)
+  server.py schema.sql
 ```
 
 ## Development
@@ -273,7 +321,13 @@ python -m pytest tests/ -q      # CLI + library + web parity
 node tests/js/run.mjs           # browser generator core
 ```
 
-Serve the web generator locally:
+Serve the full site (API + static files):
+
+```bash
+python saas/server.py          # http://127.0.0.1:8787
+```
+
+Static-only (generator and marketing, no cloud API):
 
 ```bash
 python3 -m http.server 8137 --directory web
@@ -293,7 +347,8 @@ tests, and fails if `web/wordlist.js` has drifted from the packaged wordlist.
 - The vault file is owner-only (`0600`) and written atomically with `fsync`.
 - A vault that decrypts but fails its HMAC raises `VaultIntegrityError` rather than opening.
 - The web generator never transmits or stores a password; see [web/README.md](web/README.md).
-- See [SECURITY.md](SECURITY.md) for the full threat model.
+- The SaaS API never receives master passwords, vault keys, TOTP secrets, or card numbers.
+- See [SECURITY.md](SECURITY.md) for the CLI and cloud threat models.
 - This is a learning/hobby tool. For high-stakes use, prefer Bitwarden / 1Password / KeePassXC.
 
 ## License

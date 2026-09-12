@@ -2,6 +2,43 @@
 
 ## Threat model
 
+**pwmanager** is a **local, offline-first** password manager with an optional
+**zero-knowledge** hosted companion. The CLI vault stays on your machine. The
+web vault encrypts entries in the browser; the API is designed so that a
+**server compromise should not reveal vault plaintext**.
+
+### Cloud / web vault (3.0)
+
+Designed to protect against:
+
+- An attacker who obtains the SQLite/Postgres database (emails, KDF salts,
+  Argon2id hashes of `authKey`, Stripe customer ids, AES-GCM ciphertext)
+- Network observers who see TLS to the API (they see ciphertext blobs, not
+  master passwords)
+- A buggy client attempting to PUT vault JSON in the clear (the API rejects
+  envelopes with plaintext fields such as `password` or `entries`)
+
+Not designed to resist:
+
+- A weak or reused master password (offline guessing of ciphertext)
+- Malware, XSS with a broken CSP, malicious extensions, or phishing of the
+  origin you actually type the master password into
+- An unlocked browser tab or idle session before the 5-minute lock
+- Operator mistakes if you self-host without TLS
+- Stripe account takeover (affects billing, not vault plaintext)
+
+The operator **cannot** reset a forgotten master password. Card numbers are
+accepted only by Stripe Checkout, never by this process.
+
+Browser KDF: PBKDF2-HMAC-SHA256, 600,000 iterations, SHA-256, 32-byte salt
+mixed as `SHA-256(salt || email)`. AES-GCM-256 with a 12-byte nonce and AAD
+`pwmanager-vault-v1`. Session tokens are hashed at rest; IPs in audit logs are
+HMAC-hashed. Production must terminate TLS in front of `saas/server.py`.
+
+The CLI threat model below still applies to `vault.json` files.
+
+### CLI vault
+
 **pwmanager** is a **local, offline-first** password manager. It is designed to protect
 stored credentials against:
 

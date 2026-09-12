@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cookies — pwmanager</title>
+<meta name="description" content="Cookie policy. Essential session cookie only; no non-essential cookies without consent.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to cookie policy</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./"><span class="brand-name">pwmanager</span></a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap doc">
+  <p class="kicker">Cookies · last updated 12 September 2026</p>
+  <h1>Cookie policy</h1>
+  <p>This site does not use advertising cookies, social pixels, or analytics that phone home by default.</p>
+  <h2>Essential session cookie</h2>
+  <p>When you sign in to the hosted API, the server may set <code>pwmanager_session</code>: an HttpOnly, SameSite=Strict cookie holding an opaque token. It authenticates later requests. It is not used for marketing. It expires on a rolling window (about 14 days) or when you sign out. This cookie is strictly necessary for the cloud account to work.</p>
+  <h2>Local storage (not a cookie)</h2>
+  <p>The generator stores interface preferences (theme, lengths) under <code>pwmanager.web.prefs.v1</code>. The SaaS UI stores theme under <code>pwmanager.saas.theme</code>. IndexedDB holds <strong>ciphertext envelopes</strong> for your vault, never the master password. These stay on your device.</p>
+  <h2>Consent</h2>
+  <p>We do not set non-essential cookies. If we ever add optional analytics, they will stay off until you opt in. Stripe Checkout on stripe.com uses Stripe’s own cookies; that is Stripe’s processing, described in their disclosures, after you leave this origin.</p>
+  <h2>How to clear</h2>
+  <p>Sign out to drop the session cookie. Clear site data in your browser to remove local ciphertext — keep an encrypted backup first if you still need the vault.</p>
+</main>
+<footer class="site-footer"><div class="wrap"><p><a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a> · © <span id="year">2026</span> Sebby1770</p></div></footer>
+<script type="module" src="saas/shell.js"></script>
+</body>
+</html>

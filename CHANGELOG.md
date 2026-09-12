@@ -1,5 +1,39 @@
 # Changelog
 
+## 3.1.0
+
+### Added
+- Vault keyboard shortcuts: `/` search, `n` new entry, `l` lock, `?` help.
+- Encrypted **recovery kit** download (ciphertext + warning; master password is not in the file). Import accepts kits or raw envelopes.
+- Submit buttons disable while PBKDF2 is deriving keys.
+- `Strict-Transport-Security` when `PWMANAGER_SECURE_COOKIES=1`.
+
+## 3.0.0
+
+### Added
+
+- **Zero-knowledge web vault (`web/` + `saas/`)** — browser encryption with
+  WebCrypto PBKDF2-HMAC-SHA256 (600,000 iterations) deriving two keys:
+  `vaultKey` (AES-GCM-256, never sent) and `authKey` (hashed again on the
+  server). IndexedDB stores ciphertext only. Pro cloud sync uploads an opaque
+  `{v, nonce, ct, kdf}` envelope.
+- Hosted API (`python saas/server.py`) with SQLite, HttpOnly session cookies,
+  rate-limited register/login, Stripe Checkout (no PAN on this server), HMAC
+  webhook verification, account export of ciphertext, and account deletion that
+  wipes blobs.
+- Marketing, vault, pricing, generator, and legal pages (Privacy, Terms,
+  Cookies, Security, DPA, Acceptable use) for an independent Victoria,
+  Australia project. Australian Consumer Law guarantees are not excluded.
+- Free (local vault + generator) and Pro (A$4/month or A$40/year encrypted
+  sync, versioned blobs, 8&nbsp;MiB cap). Missing Stripe keys return 503; the
+  server never fakes a paid plan.
+
+### Changed
+
+- The static generator moved to `web/generator.html`. `web/index.html` is the
+  product landing page. Generator logic in `generator.js` / `wordlist.js` is
+  unchanged.
+
 ## 2.4.0
 
 ### Added

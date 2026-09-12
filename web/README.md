@@ -1,59 +1,50 @@
-# pwmanager web generator
+# pwmanager web
 
-A static password and passphrase generator that runs entirely in the browser.
-No build step, no dependencies, no server — five files that can be opened
-straight from disk or served from any static host.
+Zero-knowledge vault UI, marketing pages, and the original static generator.
+No npm build step — ES modules and a few classic scripts.
 
-**Live:** https://sebby1770.github.io/pwmanager/
+**Generator (unchanged logic):** `generator.html` + `styles.css` + `app.js` +
+`generator.js` + `wordlist.js`. Randomness is `crypto.getRandomValues` with
+rejection sampling. CSP on that page allows a single outbound host: the HIBP
+range API.
 
-## Files
-
-| File | What it is |
-| --- | --- |
-| `index.html` | The page. Declares the Content-Security-Policy. |
-| `styles.css` | All styling. Light and dark, no external fonts. |
-| `generator.js` | Pure generator logic. Shared with `tests/js/run.mjs`. |
-| `app.js` | DOM wiring only. Never calls out except for the HIBP check. |
-| `wordlist.js` | The EFF wordlist, generated from `pwmanager/data/eff_short.txt`. |
+**Product:** `index.html` (landing), `vault.html`, `pricing.html`, legal pages,
+`saas.css`, and `saas/*.js`. Landing/vault CSP allows `'self'`, Stripe, and HIBP.
 
 ## Design rules
 
-1. **Randomness is CSPRNG-only.** `crypto.getRandomValues` with rejection
-   sampling — no `Math.random` fallback, and no modulo bias. If the browser has
-   no CSPRNG the generator raises rather than emitting a weak password.
-2. **Secrets never persist.** `localStorage` holds interface preferences under
-   one key and nothing else. Nothing is written to the URL, and there is no
-   analytics or telemetry of any kind.
-3. **One outbound destination.** The CSP allows `connect-src
-   https://api.pwnedpasswords.com` and nothing else, so the page cannot exfiltrate
-   even if a script were somehow injected. That request only fires on a click,
-   and carries five hex characters of a SHA-1 hash.
-4. **Parity with the CLI.** Same symbol set, same lookalike set, same presets,
-   same wordlist, same entropy thresholds. `tests/test_web_parity.py` fails if
-   either side drifts.
+1. **Secrets stay in the tab.** The master password and `vaultKey` are never
+   written to URLs, cookies, or the network. IndexedDB holds ciphertext.
+2. **Two keys.** PBKDF2-HMAC-SHA256, 600,000 iterations, 32-byte salt mixed
+   with the email. `vaultKey` encrypts; `authKey` authenticates.
+3. **No inline script.** Pages declare a restrictive Content-Security-Policy.
+4. **Generator parity.** `generator.js` / `wordlist.js` stay in lock-step with
+   the CLI; `tests/test_web_parity.py` and `tests/js/run.mjs` enforce that.
 
 ## Running locally
+
+Preferred (API + static):
+
+```sh
+python saas/server.py
+```
+
+Static only:
 
 ```sh
 python3 -m http.server 8137 --directory web
 ```
 
-Then open http://localhost:8137. A `file://` open works too, though the
-clipboard and SHA-1 hashing need a secure context (https or localhost).
-
 ## Tests
 
 ```sh
-node tests/js/run.mjs          # generator core: bias, policy, entropy, HIBP parsing
-python -m pytest tests/test_web_parity.py -q   # web <-> CLI parity
+node tests/js/run.mjs                 # generator core
+node tests/js/saas_crypto.mjs         # AES-GCM envelope roundtrip
+python -m pytest tests/test_web_parity.py tests/test_saas_crypto_envelope.py -q
 ```
 
-## Regenerating the wordlist
-
-`web/wordlist.js` is generated. After editing `pwmanager/data/eff_short.txt`:
+Regenerate `wordlist.js` after editing `pwmanager/data/eff_short.txt`:
 
 ```sh
 python3 scripts/build_web_wordlist.py
 ```
-
-CI fails if the checked-in file does not match its source.

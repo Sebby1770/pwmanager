@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms — pwmanager</title>
+<meta name="description" content="Terms of use for pwmanager. Australian Consumer Law rights are not excluded.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to terms</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 14.2V11.4a5.5 5.5 0 1 1 11 0v2.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><rect x="8.5" y="14" width="15" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="16" cy="19.6" r="1.55" fill="currentColor"/></svg>
+      <span class="brand-name">pwmanager</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="vault.html">Vault</a>
+      <a href="pricing.html">Pricing</a>
+      <a href="privacy.html">Privacy</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap doc">
+  <p class="kicker">Terms · last updated 12 September 2026</p>
+  <h1>Terms of use</h1>
+  <p>These terms govern use of the pwmanager website, browser vault, and optional hosted API. The Python CLI is also offered under the MIT licence. The operator is Sebby1770, an independent project in Victoria, Australia — not a bank, not an AFSL holder, and not a substitute for 1Password, Bitwarden, or KeePassXC where you need an audited enterprise product.</p>
+
+  <h2>Agreement and age</h2>
+  <p>By creating a vault or cloud account you agree to these terms and the <a href="acceptable-use.html">acceptable use</a> policy. You must be <strong>16 or older</strong>.</p>
+
+  <h2>The service</h2>
+  <p><strong>Free</strong> means a local encrypted vault and generator in your browser. <strong>Pro</strong> (A$4 per month or A$40 per year) adds encrypted cloud sync of opaque blobs, multi-device access, versioned ciphertext, and a higher size cap. Features may change; we will not quietly convert a local vault into a cloud upload without your action.</p>
+
+  <h2>Zero-knowledge and no recovery</h2>
+  <p>Encryption is performed on your device. We do not receive your master password or vaultKey. <strong>If you forget the master password, the vault cannot be recovered by anyone, including us.</strong> You are responsible for remembering it and for keeping encrypted backups you can decrypt.</p>
+
+  <h2>Australian Consumer Law</h2>
+  <p>If you are a consumer in Australia, you have guarantees under the Australian Consumer Law (ACL) that cannot be excluded, including that services will be provided with due care and skill and be reasonably fit for the purpose made known. Digital services can still have a major failure. <strong>Nothing in these terms excludes, restricts, or modifies those guarantees</strong> to the extent it would be unlawful to do so.</p>
+  <p>If Pro is not fit for purpose or we fail to supply it with due care, you may be entitled to a repair, replacement, re-supply, or refund as the ACL provides. We will not use “all sales final” language to strip those rights. Reasonable refunds for prepaid Pro that we cannot supply, or that has a major failure, will be processed via Stripe to the original payment method where possible.</p>
+  <p>Where the ACL allows liability to be limited for goods or services that are not of a kind ordinarily acquired for personal, domestic, or household use, we limit our liability to re-supplying the service or paying the cost of re-supply.</p>
+
+  <h2>Fees and Stripe</h2>
+  <p>Pro is billed by Stripe. We never collect full card numbers. Prices are in Australian dollars. We do not claim GST registration here. Cancel in Stripe’s customer portal or by deleting the account; access continues until the paid period ends unless the ACL requires otherwise.</p>
+
+  <h2>Acceptable use and your content</h2>
+  <p>You must not use the service for criminal activity, to store other people’s data unlawfully, or to abuse the API. You are the controller of whatever you encrypt. We host ciphertext we cannot read; that does not authorise illegal content. See <a href="acceptable-use.html">acceptable use</a>.</p>
+
+  <h2>Availability and security</h2>
+  <p>The hosted demo is best-effort. Self-hosting is supported. We do not warrant uninterrupted access. You must keep your device free of malware; we cannot protect an unlocked session on a compromised computer. Read <a href="security.html">security</a>.</p>
+
+  <h2>Intellectual property</h2>
+  <p>The software is MIT-licensed as published in the repository. These website terms do not take away that licence for the code. Trademarks and the “pwmanager” name as used on this site remain with the operator.</p>
+
+  <h2>Liability</h2>
+  <p>Subject always to the ACL and any non-excludable rights elsewhere: the software and hosted service are provided without hidden promises of fitness beyond what the law requires; we are not liable for lost vaults caused by a forgotten master password; we are not liable for indirect or consequential loss except where the law forbids that exclusion. This is an independent project, not an insured custody service.</p>
+
+  <h2>Governing law</h2>
+  <p>These terms are governed by the laws of Victoria, Australia. Courts of Victoria may hear disputes, without limiting any non-excludable ACL rights or the right of consumers to use applicable regulators (including the OAIC or ACCC where relevant).</p>
+
+  <h2>Changes</h2>
+  <p>We may update these terms by publishing a new date on this page. Material changes to paid features will be described in the changelog or this page. Continued paid use after notice is acceptance of the update, without affecting ACL rights already accrued.</p>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p><strong>pwmanager</strong> · Sebby1770 · Victoria, Australia. © <span id="year">2026</span></p></div><div class="footer-links"><a href="privacy.html">Privacy</a><a href="cookies.html">Cookies</a><a href="dpa.html">DPA</a></div><div class="footer-links"><a href="security.html">Security</a><a href="acceptable-use.html">Acceptable use</a></div></div></footer>
+<script type="module" src="saas/shell.js"></script>
+</body>
+</html>

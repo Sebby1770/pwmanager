@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data processing — pwmanager</title>
+<meta name="description" content="Data processing terms for pwmanager ciphertext blobs. Customer is controller of vault contents.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to DPA</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./"><span class="brand-name">pwmanager</span></a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap doc">
+  <p class="kicker">Data processing terms · 12 September 2026</p>
+  <h1>Processor terms for ciphertext only</h1>
+  <p>These terms apply when you use the hosted Pro sync. They sit with the <a href="terms.html">Terms</a> and <a href="privacy.html">Privacy policy</a>.</p>
+
+  <h2>Roles</h2>
+  <p><strong>You</strong> are the controller of the vault contents you choose to encrypt on your device (passwords, notes, TOTP secrets, names). <strong>Sebby1770 / pwmanager</strong> is a processor only of the <em>opaque ciphertext blob</em> and a controller of limited account metadata (email, plan, hashed auth verifier, hashed IPs on audit events).</p>
+  <p>Because we cannot decrypt the blob, we cannot fulfil a plaintext access request against vault contents. We can delete the blob, export the envelope, and tell you what account metadata we hold.</p>
+
+  <h2>Instructions</h2>
+  <p>We process the blob only to store, version (Pro), retrieve, export, or delete it on your instruction via the API. We will not attempt to decrypt it. We will not sell it.</p>
+
+  <h2>Sub-processors</h2>
+  <ul>
+    <li><strong>Stripe</strong> — payment processing for Pro. Card data is Stripe’s PCI scope, not ours.</li>
+  </ul>
+  <p>If you self-host, you choose the hosting sub-processors. A public demo, if offered, is best-effort and may run on whatever host the operator currently uses; treat it as a test instance, not a bank-grade custody platform.</p>
+
+  <h2>Security measures</h2>
+  <p>Described on the <a href="security.html">security</a> page: TLS assumed in production, hashed verifiers, hashed session tokens, size limits, webhook HMAC, no plaintext password columns. These are proportionate to an independent project, not a certified ISMS.</p>
+
+  <h2>Assistance</h2>
+  <p>We will assist with deletion and ciphertext portability. We cannot search inside vaults. If a data-subject request concerns content inside the envelope, you must handle it — you hold the key.</p>
+
+  <h2>Breach</h2>
+  <p>If we become aware of a breach of personal information we hold (for example account emails or ciphertext at rest), we will notify you without undue delay and assess Australian NDB / GDPR duties as applicable. We still cannot decrypt your vault to see what was inside the blob.</p>
+
+  <h2>Deletion and return</h2>
+  <p>On account deletion we wipe blobs, revisions, and sessions, and tombstone the email. You should export an encrypted backup first. Payment event identifiers may remain for legal record-keeping without card objects.</p>
+
+  <h2>Law</h2>
+  <p>Victoria, Australia, without limiting mandatory privacy or consumer laws that apply to you.</p>
+</main>
+<footer class="site-footer"><div class="wrap"><p><a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a> · © <span id="year">2026</span></p></div></footer>
+<script type="module" src="saas/shell.js"></script>
+</body>
+</html>
