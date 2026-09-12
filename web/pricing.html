@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pricing — pwmanager</title>
+<meta name="description" content="Free local vault or Pro encrypted cloud sync. A$4/month or A$40/year, billed by Stripe.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to pricing</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M10.5 14.2V11.4a5.5 5.5 0 1 1 11 0v2.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        <rect x="8.5" y="14" width="15" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <circle cx="16" cy="19.6" r="1.55" fill="currentColor"/>
+      </svg>
+      <span class="brand-name">pwmanager</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="vault.html">Vault</a>
+      <a href="generator.html">Generator</a>
+      <a href="pricing.html" aria-current="page">Pricing</a>
+      <a href="security.html">Security</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+
+<main id="main" class="section wrap">
+  <p class="kicker">Australian dollars</p>
+  <h1>Free locally. Pro for ciphertext in the cloud.</h1>
+  <p class="lede">Checkout happens on Stripe. pwmanager never collects PAN, CVC, or expiry. If Stripe keys are missing on this instance, the API returns 503 and nobody is marked as paid.</p>
+  <p id="pricing-status" class="status" role="status"></p>
+  <p id="stripe-setup" class="warning-callout" hidden>
+    This instance has no Stripe keys. Set PWMANAGER_STRIPE_SECRET, PWMANAGER_STRIPE_WEBHOOK_SECRET, PWMANAGER_STRIPE_PRICE_MONTHLY, and PWMANAGER_STRIPE_PRICE_YEARLY, then restart. Use Stripe test mode locally.
+  </p>
+
+  <div class="price-grid">
+    <article class="price-card">
+      <h3>Free</h3>
+      <p class="price">A$0 <span>on this device</span></p>
+      <ul>
+        <li>Zero-knowledge vault in IndexedDB (ciphertext)</li>
+        <li>Password generator, TOTP, audit</li>
+        <li>Optional HIBP range check</li>
+        <li>Encrypted export / import</li>
+        <li>No cloud copy</li>
+      </ul>
+      <a class="btn btn-ghost" href="vault.html">Open the vault</a>
+    </article>
+    <article class="price-card is-featured">
+      <h3>Pro</h3>
+      <p class="price">A$4 <span>/ month</span></p>
+      <p class="fine">or A$40 / year (two months free).</p>
+      <ul>
+        <li>Everything in Free</li>
+        <li>Encrypted cloud sync of the envelope only</li>
+        <li>Multi-device (same email + master password)</li>
+        <li>Versioned blobs, last 20</li>
+        <li>Up to 8&nbsp;MiB stored envelope</li>
+      </ul>
+      <div class="form-actions">
+        <button type="button" class="btn btn-brass" id="pay-month">Subscribe monthly</button>
+        <button type="button" class="btn btn-ghost" id="pay-year">Subscribe yearly</button>
+      </div>
+      <p class="fine">You need a cloud account in the vault first. Australian Consumer Law consumer guarantees cannot be excluded; if Pro is not fit for purpose we will refund the unused prepaid period reasonably.</p>
+    </article>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <p><strong>pwmanager</strong> — independent project by Sebby1770, Victoria, Australia.</p>
+      <p>© <span id="year">2026</span></p>
+    </div>
+    <div class="footer-links">
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <a href="cookies.html">Cookies</a>
+      <a href="security.html">Security</a>
+    </div>
+    <div class="footer-links">
+      <a href="dpa.html">Data processing</a>
+      <a href="acceptable-use.html">Acceptable use</a>
+      <a href="https://github.com/Sebby1770/pwmanager">Source</a>
+    </div>
+  </div>
+</footer>
+<script type="module" src="saas/pricing.js"></script>
+</body>
+</html>

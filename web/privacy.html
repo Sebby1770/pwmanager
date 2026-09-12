@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — pwmanager</title>
+<meta name="description" content="Privacy policy for pwmanager. Zero-knowledge vaults; Australian Privacy Principles as best practice.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to privacy policy</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 14.2V11.4a5.5 5.5 0 1 1 11 0v2.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><rect x="8.5" y="14" width="15" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="16" cy="19.6" r="1.55" fill="currentColor"/></svg>
+      <span class="brand-name">pwmanager</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="vault.html">Vault</a>
+      <a href="pricing.html">Pricing</a>
+      <a href="security.html">Security</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap doc">
+  <p class="kicker">Privacy · last updated 12 September 2026</p>
+  <h1>Privacy policy</h1>
+  <p>pwmanager is an independent project operated by Sebby1770 in Victoria, Australia. This policy describes how the hosted SaaS treats information. The CLI on your computer does not send us vault contents.</p>
+
+  <h2>Honesty about the Privacy Act</h2>
+  <p>The <strong>Australian Privacy Principles</strong> (Privacy Act 1988 (Cth)) apply to APP entities. Small businesses with annual turnover under the statutory threshold are often exempt, unless an exception applies (for example, trading in personal information). We do <strong>not</strong> claim that the operator is an APP entity as a matter of law. We still commit to handle personal information in an APP-style way: collect only what we need, store it securely, and give you access, correction, and deletion paths.</p>
+  <p>If an eligible data breach of personal information we hold occurs, we will assess it against the <strong>Notifiable Data Breaches</strong> scheme and notify the OAIC and affected individuals where that scheme requires it. Vault ciphertext we cannot decrypt is still “information we hold”; a dump of emails and ciphertext would be assessed on its facts.</p>
+
+  <h2>What we never receive</h2>
+  <p>Your <strong>master password</strong>, <strong>vaultKey</strong>, decrypted entries, TOTP secrets, and payment card numbers are not collected by pwmanager. Encryption happens in the browser. Stripe is the payment processor and is PCI-DSS responsible for card data. Optional Have I Been Pwned checks send only the first five hex characters of a SHA-1 password hash from your browser, not through our API.</p>
+
+  <h2>What we do store (if you create a cloud account)</h2>
+  <ul>
+    <li>Email address (account identifier, normalised).</li>
+    <li>A hash of an authentication key derived in your browser (not the master password).</li>
+    <li>KDF salt and parameters (not secret by themselves).</li>
+    <li>Opaque vault ciphertext, nonce, size, and version — Pro only.</li>
+    <li>Stripe customer id, plan, subscription status, and period end — never PAN.</li>
+    <li>Hashed session tokens, hashed IP addresses on security events, hashed user-agent on sessions.</li>
+  </ul>
+  <p>A local-only vault stores ciphertext in your browser storage. We do not receive it unless you enable Pro sync.</p>
+
+  <h2>Zero-knowledge limitation</h2>
+  <p>We cannot decrypt your vault. If you forget the master password, the contents are gone. We cannot “reset” access. This is also stated in the Terms, the Security page, and the signup screen.</p>
+
+  <h2>Lawful bases (EU/UK visitors)</h2>
+  <p>If the GDPR or UK GDPR applies to you: we process account data to perform a contract (running the service you asked for) and, for hashed security logs, on legitimate interests in protecting accounts. You may request access, correction, deletion, portability of the ciphertext blob plus account metadata, restriction, or objection. Portability of vault contents in plaintext is impossible for us; we can export the envelope.</p>
+
+  <h2>Cookies</h2>
+  <p>The hosted API sets an essential HttpOnly session cookie after you sign in. No advertising, analytics, or non-essential cookies are set by default. See the <a href="cookies.html">cookie policy</a>.</p>
+
+  <h2>Retention and deletion</h2>
+  <p>Cloud accounts remain until you delete them or they stay unused according to operational needs. Deletion wipes vault blobs, sessions, and tombstones the email. Payment event ids may be kept for accounting and fraud disputes. You can export ciphertext plus metadata before deleting.</p>
+
+  <h2>Overseas disclosure</h2>
+  <p>If you use Stripe, payment metadata is processed by Stripe according to their terms (they may store data outside Australia). If you self-host, this hosted policy does not apply to your instance.</p>
+
+  <h2>Children</h2>
+  <p>The service is for people aged <strong>16 or older</strong>.</p>
+
+  <h2>Contact</h2>
+  <p>Use the GitHub repository for the project: <a href="https://github.com/Sebby1770/pwmanager">github.com/Sebby1770/pwmanager</a>. Do not email real passwords or vault files.</p>
+</main>
+<footer class="site-footer"><div class="wrap footer-grid"><div><p><strong>pwmanager</strong> · Sebby1770 · Victoria, Australia. © <span id="year">2026</span></p></div><div class="footer-links"><a href="terms.html">Terms</a><a href="cookies.html">Cookies</a><a href="dpa.html">DPA</a></div><div class="footer-links"><a href="security.html">Security</a><a href="acceptable-use.html">Acceptable use</a></div></div></footer>
+<script type="module" src="saas/shell.js"></script>
+</body>
+</html>

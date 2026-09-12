@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault — pwmanager</title>
+<meta name="description" content="Unlock or create a zero-knowledge pwmanager vault. Master passwords never leave this browser.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to vault</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M10.5 14.2V11.4a5.5 5.5 0 1 1 11 0v2.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        <rect x="8.5" y="14" width="15" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <circle cx="16" cy="19.6" r="1.55" fill="currentColor"/>
+      </svg>
+      <span class="brand-name">pwmanager</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="vault.html" aria-current="page">Vault</a>
+      <a href="generator.html">Generator</a>
+      <a href="pricing.html">Pricing</a>
+      <a href="security.html">Security</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+
+<main id="main" class="vault-shell wrap">
+  <section id="view-lock" class="lock-card" aria-labelledby="lock-heading">
+    <p class="kicker">Local-first vault</p>
+    <h1 id="lock-heading">Unlock or create</h1>
+    <p class="fine">Email binds the key derivation. The master password is never sent to the server. If you forget it, the vault is unrecoverable — we cannot open it either.</p>
+
+    <div class="tabs" role="tablist" aria-label="Vault mode">
+      <button type="button" role="tab" id="tab-unlock" aria-controls="panel-unlock" aria-selected="true">Unlock</button>
+      <button type="button" role="tab" id="tab-create" aria-controls="panel-create" aria-selected="false">Create vault</button>
+    </div>
+
+    <div id="panel-unlock" role="tabpanel" aria-labelledby="tab-unlock">
+      <form id="unlock-form">
+        <div class="field">
+          <label for="unlock-email">Email</label>
+          <input id="unlock-email" name="email" type="email" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="unlock-password">Master password</label>
+          <input id="unlock-password" name="password" type="password" autocomplete="current-password" minlength="12" required>
+        </div>
+        <button class="btn btn-brass" type="submit">Unlock</button>
+      </form>
+    </div>
+
+    <div id="panel-create" role="tabpanel" aria-labelledby="tab-create" hidden>
+      <form id="create-form">
+        <div class="field">
+          <label for="create-email">Email</label>
+          <input id="create-email" name="email" type="email" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="create-password">Master password (min 12 characters)</label>
+          <input id="create-password" name="password" type="password" autocomplete="new-password" minlength="12" required>
+          <div class="meter" role="img" aria-labelledby="create-meter-label"><span id="create-meter"></span></div>
+          <p id="create-meter-label" class="fine">Too short</p>
+        </div>
+        <div class="field">
+          <label for="create-password2">Confirm master password</label>
+          <input id="create-password2" name="password2" type="password" autocomplete="new-password" minlength="12" required>
+        </div>
+        <div class="warning-callout">
+          If you forget this master password, nobody can recover the vault — not you, not pwmanager, not a support inbox that does not exist.
+        </div>
+        <label class="check"><input id="create-age" type="checkbox" required> I am 16 or older.</label>
+        <label class="check"><input id="create-warning" type="checkbox" required> I understand there is no master-password recovery.</label>
+        <label class="check"><input id="create-cloud" type="checkbox"> Also create a cloud account (ciphertext sync requires Pro).</label>
+        <button class="btn btn-brass" type="submit">Create vault</button>
+      </form>
+    </div>
+    <p id="lock-status" class="status" role="status"></p>
+  </section>
+
+  <section id="view-app" class="app-card" hidden>
+    <div class="app-layout">
+      <aside class="sidebar">
+        <div class="plan-row">
+          <span id="sync-status">Local ciphertext only</span>
+          <span class="badge" id="plan-badge">Local</span>
+        </div>
+        <label class="visually-hidden" for="search">Search entries</label>
+        <input id="search" type="search" placeholder="Search name, user, url, tags" autocomplete="off">
+        <div class="sidebar-tools">
+          <button type="button" class="btn btn-brass" id="btn-add">Add</button>
+          <button type="button" class="btn btn-ghost" id="filter-fav" aria-pressed="false">Favorites</button>
+          <button type="button" class="btn btn-ghost" id="btn-audit">Audit</button>
+        </div>
+        <div class="sidebar-tools">
+          <button type="button" class="btn btn-ghost" id="btn-export">Export</button>
+          <button type="button" class="btn btn-ghost" id="btn-kit">Recovery kit</button>
+          <button type="button" class="btn btn-ghost" id="btn-import">Import</button>
+          <input id="import-file" type="file" accept="application/json,.json" hidden>
+          <button type="button" class="btn btn-ghost" id="btn-sync">Sync</button>
+        </div>
+        <div class="sidebar-tools">
+          <button type="button" class="btn btn-ghost" id="btn-account">Account</button>
+          <button type="button" class="btn btn-ghost" id="btn-help">Help</button>
+          <button type="button" class="btn btn-ghost" id="btn-lock">Lock</button>
+        </div>
+        <ul id="entry-list" class="entry-list" aria-label="Entries"></ul>
+      </aside>
+      <div class="detail">
+        <div id="pane-empty">
+          <p class="kicker">Unlocked</p>
+          <h2>Select an entry or add one.</h2>
+          <p class="fine">Secrets stay in memory until idle lock (5 minutes) or you press Lock. Copies clear after 20 seconds.</p>
+          <ul class="kbd-list">
+            <li><kbd>/</kbd> search</li>
+            <li><kbd>n</kbd> new entry</li>
+            <li><kbd>l</kbd> lock</li>
+            <li><kbd>?</kbd> help</li>
+          </ul>
+        </div>
+        <div id="pane-detail" hidden>
+          <form id="entry-form">
+            <input id="entry-id" type="hidden">
+            <div class="field">
+              <label for="entry-kind">Kind</label>
+              <select id="entry-kind">
+                <option value="login">Login</option>
+                <option value="note">Secure note</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="entry-name">Name</label>
+              <input id="entry-name" required autocomplete="off">
+            </div>
+            <div class="field" data-login-only>
+              <label for="entry-username">Username</label>
+              <input id="entry-username" autocomplete="off">
+            </div>
+            <div class="field" data-login-only>
+              <label for="entry-password">Password</label>
+              <input id="entry-password" type="password" autocomplete="off" spellcheck="false">
+              <div class="output-actions">
+                <button type="button" class="btn btn-ghost" id="entry-generate">Generate</button>
+                <button type="button" class="btn btn-ghost" id="entry-reveal" aria-pressed="false">Reveal</button>
+                <button type="button" class="btn btn-ghost" id="entry-copy-password">Copy password</button>
+                <button type="button" class="btn btn-ghost" id="entry-copy-username">Copy username</button>
+              </div>
+            </div>
+            <div class="field" data-login-only>
+              <label for="entry-url">URL</label>
+              <input id="entry-url" type="url" autocomplete="off" placeholder="https://">
+            </div>
+            <div class="field" data-login-only>
+              <label for="entry-totp">TOTP secret (base32)</label>
+              <input id="entry-totp" autocomplete="off" spellcheck="false">
+            </div>
+            <div id="totp-wrap" class="totp-wrap" data-login-only hidden>
+              <p class="kicker">Current code</p>
+              <p class="totp-code" id="totp-display">—— — —</p>
+              <div class="meter"><span id="totp-bar"></span></div>
+              <button type="button" class="btn btn-ghost" id="entry-copy-totp">Copy code</button>
+            </div>
+            <div class="field">
+              <label for="entry-notes">Notes</label>
+              <textarea id="entry-notes"></textarea>
+            </div>
+            <div class="field">
+              <label for="entry-tags">Tags (comma separated)</label>
+              <input id="entry-tags" autocomplete="off">
+            </div>
+            <label class="check"><input id="entry-favorite" type="checkbox"> Favorite</label>
+            <div class="field" data-login-only>
+              <button type="button" class="btn btn-ghost" id="btn-hibp">Check HIBP (k-anonymity)</button>
+              <p id="hibp-result" class="fine" role="status"></p>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-brass" id="entry-save" type="submit">Save</button>
+              <button class="btn btn-ghost" id="entry-cancel" type="button">Close</button>
+              <button class="btn btn-danger" id="entry-delete" type="button">Delete</button>
+            </div>
+          </form>
+        </div>
+        <aside id="audit-panel" class="audit-panel" hidden></aside>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog class="account-dialog" id="help-dialog" aria-labelledby="help-heading">
+  <h2 id="help-heading">Vault keys</h2>
+  <p class="fine">These shortcuts are ignored while you are typing in a field.</p>
+  <ul class="kbd-list">
+    <li><kbd>/</kbd> focus search</li>
+    <li><kbd>n</kbd> new entry</li>
+    <li><kbd>l</kbd> lock and wipe secrets from memory</li>
+    <li><kbd>?</kbd> this help</li>
+    <li><kbd>Esc</kbd> close dialogs</li>
+  </ul>
+  <p class="fine">A recovery kit is ciphertext plus a warning. It cannot open the vault without the master password.</p>
+  <button type="button" class="btn btn-ghost" id="help-close">Close</button>
+</dialog>
+
+<dialog class="account-dialog" id="account-dialog">
+  <h2>Account</h2>
+  <p id="account-body"></p>
+  <div class="form-actions">
+    <button type="button" class="btn btn-brass" id="btn-checkout-month">Pro monthly (A$4)</button>
+    <button type="button" class="btn btn-ghost" id="btn-checkout-year">Pro yearly (A$40)</button>
+  </div>
+  <div class="form-actions">
+    <button type="button" class="btn btn-ghost" id="btn-logout">Sign out of cloud</button>
+    <button type="button" class="btn btn-danger" id="btn-delete-account">Delete cloud account</button>
+    <button type="button" class="btn btn-ghost" id="account-close">Close</button>
+  </div>
+  <p class="fine">Checkout uses Stripe. If keys are not configured the API returns 503 and nothing is marked paid.</p>
+</dialog>
+
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <p><strong>pwmanager</strong> — independent project by Sebby1770, Victoria, Australia.</p>
+      <p>© <span id="year">2026</span></p>
+    </div>
+    <div class="footer-links">
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+      <a href="cookies.html">Cookies</a>
+      <a href="security.html">Security</a>
+    </div>
+    <div class="footer-links">
+      <a href="dpa.html">Data processing</a>
+      <a href="acceptable-use.html">Acceptable use</a>
+      <a href="https://github.com/Sebby1770/pwmanager">Source</a>
+    </div>
+  </div>
+</footer>
+<noscript><p class="wrap fine">The vault needs JavaScript so encryption can run in your browser.</p></noscript>
+<script type="module" src="saas/vault-app.js"></script>
+</body>
+</html>

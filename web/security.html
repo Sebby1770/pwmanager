@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security — pwmanager</title>
+<meta name="description" content="Threat model for pwmanager: local CLI and zero-knowledge cloud ciphertext.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to security</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./"><span class="brand-name">pwmanager</span></a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="vault.html">Vault</a>
+      <a href="privacy.html">Privacy</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap doc">
+  <p class="kicker">Security · threat model</p>
+  <h1>What we designed for — and what we did not</h1>
+  <p>pwmanager is an independent project. It is not SOC 2 certified, not ISO 27001 certified, not insured, and not “unhackable”. Treat it as a careful personal tool. For primary email, banking, or work SSO, prefer a mature audited product if that is what your risk requires.</p>
+
+  <h2>Zero-knowledge cloud</h2>
+  <p>A compromise of the API database should yield emails, KDF salts, auth-key hashes, Stripe customer ids, and <strong>AES-GCM ciphertext</strong>. It should not yield master passwords, vaultKeys, or entry plaintext. That property fails if you choose a guessable master password, if the browser is compromised, or if we shipped a buggy client that uploaded plaintext (the API rejects envelopes that look like vault JSON in the clear).</p>
+  <p><strong>Forgotten master password = permanent data loss.</strong> There is no operator recovery.</p>
+
+  <h2>Browser cryptography</h2>
+  <ul>
+    <li>PBKDF2-HMAC-SHA256, 600,000 iterations, SHA-256, 32-byte salt mixed with the email via SHA-256(salt ∥ email).</li>
+    <li>64 bytes derived: 32-byte vaultKey (AES-GCM-256) and 32-byte authKey (sent to the server, hashed again with Argon2id or PBKDF2).</li>
+    <li>AES-GCM with a random 12-byte nonce and AAD <code>pwmanager-vault-v1</code>.</li>
+    <li>IndexedDB / localStorage hold ciphertext or UI prefs, not the master password.</li>
+  </ul>
+
+  <h2>CLI (unchanged)</h2>
+  <p>The Python vault still uses Argon2id (or PBKDF2 fallback) and Fernet plus a file HMAC. See <a href="https://github.com/Sebby1770/pwmanager/blob/main/SECURITY.md">SECURITY.md</a> in the repository for that threat model.</p>
+
+  <h2>What we cannot protect against</h2>
+  <ul>
+    <li>Malware, keyloggers, malicious browser extensions, or a rooted device.</li>
+    <li>Phishing that tricks you into typing the master password on a fake origin.</li>
+    <li>Shoulder surfing or an unlocked tab.</li>
+    <li>Someone who already knows a weak master password (offline brute force of ciphertext).</li>
+    <li>Physical memory inspection while the vault is unlocked.</li>
+    <li>Supply-chain compromise of the files you actually load. Pin and review the source; this site uses a tight CSP (no inline script).</li>
+  </ul>
+
+  <h2>Operational controls on the API</h2>
+  <ul>
+    <li>Rate-limited register/login (5 / minute / hashed IP).</li>
+    <li>HttpOnly SameSite=Strict session cookies; tokens hashed at rest.</li>
+    <li>Request size limits; vault blobs capped (2&nbsp;MiB free path / 8&nbsp;MiB Pro).</li>
+    <li>IPs stored only as HMAC hashes. Stripe webhooks verified with HMAC <code>Stripe-Signature</code>.</li>
+    <li>TLS is assumed in production — do not expose <code>python saas/server.py</code> on the public internet without HTTPS.</li>
+  </ul>
+
+  <h2>HIBP</h2>
+  <p>Optional, k-anonymity only: the browser sends a 5-character SHA-1 prefix to <code>api.pwnedpasswords.com</code>. We do not proxy that request.</p>
+
+  <h2>Reporting</h2>
+  <p>Please report vulnerabilities via GitHub security advisories on <a href="https://github.com/Sebby1770/pwmanager">the repository</a>. Do not attach real vaults.</p>
+</main>
+<footer class="site-footer"><div class="wrap"><p><a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a> · © <span id="year">2026</span> Sebby1770, Victoria, Australia</p></div></footer>
+<script type="module" src="saas/shell.js"></script>
+</body>
+</html>

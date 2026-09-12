@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acceptable use — pwmanager</title>
+<meta name="description" content="Acceptable use policy for pwmanager. No criminal use, no storing others’ data unlawfully, no abuse.">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="saas.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to acceptable use</a>
+<header class="site-nav">
+  <div class="nav-inner">
+    <a class="brand" href="./"><span class="brand-name">pwmanager</span></a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links">Menu</button>
+    <nav id="nav-links" class="nav-links">
+      <a href="terms.html">Terms</a>
+      <a href="privacy.html">Privacy</a>
+      <button type="button" class="theme-toggle" data-theme-toggle>Dark</button>
+    </nav>
+  </div>
+</header>
+<main id="main" class="wrap doc">
+  <p class="kicker">Acceptable use · 12 September 2026</p>
+  <h1>Acceptable use</h1>
+  <p>You may use pwmanager to store your own credentials and notes. You may not:</p>
+  <ul>
+    <li>Use the service to commit or facilitate crime (including fraud, unauthorised access, or dealing in stolen credentials).</li>
+    <li>Store other people’s personal information without a lawful right to do so.</li>
+    <li>Attack, scan, or overload the API, bypass rate limits, or attempt to decrypt other users’ blobs.</li>
+    <li>Upload malware, exploits, or content whose mere hosting would be unlawful in Victoria, Australia.</li>
+    <li>Misrepresent the product as a bank, certified custody service, or licensed financial advice.</li>
+    <li>Create accounts for people under 16, or share a master password in a way that makes you an unauthorised operator of someone else’s vault.</li>
+  </ul>
+  <p>Zero-knowledge hosting does not make unlawful content lawful. If we receive a valid legal notice we may suspend an account, delete ciphertext we cannot read, and preserve records the law requires. We cannot inspect vault plaintext to “moderate” it; enforcement is on metadata, abuse of the API, and lawful process.</p>
+  <p>The Python CLI on your own machine is yours to run; these hosted-service rules apply to the website and API.</p>
+</main>
+<footer class="site-footer"><div class="wrap"><p><a href="terms.html">Terms</a> · <a href="privacy.html">Privacy</a> · © <span id="year">2026</span></p></div></footer>
+<script type="module" src="saas/shell.js"></script>
+</body>
+</html>

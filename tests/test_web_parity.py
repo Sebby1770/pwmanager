@@ -146,16 +146,34 @@ def test_every_flag_the_site_suggests_exists_in_the_cli():
 
 
 def test_web_page_declares_a_restrictive_csp():
+    """The generator page (moved to generator.html) keeps its original CSP."""
+    html = (WEB / "generator.html").read_text(encoding="utf-8")
+    csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', html)
+    assert csp, "generator.html has no Content-Security-Policy meta tag"
+    policy = csp.group(1)
+    assert "default-src 'none'" in policy
+    assert "script-src 'self'" in policy
+    assert "unsafe-inline" not in policy
+    # The HIBP range endpoint is the only outbound connection the generator may make.
+    connect = re.search(r"connect-src ([^;]+)", policy)
+    assert connect, "CSP has no connect-src"
+    assert connect.group(1).split() == ["https://api.pwnedpasswords.com"]
+
+
+def test_landing_page_declares_a_restrictive_csp():
     html = (WEB / "index.html").read_text(encoding="utf-8")
     csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', html)
     assert csp, "index.html has no Content-Security-Policy meta tag"
     policy = csp.group(1)
     assert "default-src 'none'" in policy
     assert "script-src 'self'" in policy
-    # The HIBP range endpoint is the only outbound connection the page may make.
+    assert "unsafe-inline" not in policy
+    assert "unsafe-eval" not in policy
     connect = re.search(r"connect-src ([^;]+)", policy)
     assert connect, "CSP has no connect-src"
-    assert connect.group(1).split() == ["https://api.pwnedpasswords.com"]
+    tokens = connect.group(1).split()
+    assert "'self'" in tokens
+    assert "https://api.pwnedpasswords.com" in tokens
 
 
 def test_web_scripts_never_persist_a_secret():

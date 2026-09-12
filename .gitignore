@@ -4,6 +4,13 @@ vault_export.json
 *.vault.json
 *.tmp
 
+# SaaS local database
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+pwmanager-saas.sqlite
+pwmanager-saas.db
+
 # Vault backups
 vault.json.bak
 vault.json.backup
