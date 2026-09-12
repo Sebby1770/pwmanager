@@ -289,7 +289,7 @@ Other fields: `username`, `password`, `url`, `notes`, `tags`, `totp_secret`, `hi
 
 ```
 pwmanager/
-  __init__.py      # version 3.1.0
+  __init__.py      # version 3.2.0
   __main__.py
   crypto.py
   generators.py    # presets: pin|wifi|apple|max

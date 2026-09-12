@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwmanager"
-version = "3.1.0"
+version = "3.2.0"
 description = "Zero-knowledge password manager: AES-256-GCM CLI plus an optional encrypted-cloud web vault"
 readme = "README.md"
 license = { text = "MIT" }

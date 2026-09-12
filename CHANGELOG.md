@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.2.0
+
+### Added
+- Visible idle-lock countdown in the vault sidebar.
+- Five-word passphrase generator (EFF wordlist, rejection-sampled) beside the existing password generator.
+- Landing honesty strip: never on the wire, never in a URL, never recoverable.
+
 ## 3.1.0
 
 ### Added

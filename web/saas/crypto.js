@@ -263,6 +263,22 @@ function randomInt(bound) {
   }
 }
 
+export function generatePassphrase(wordCount, separator) {
+  const list = globalThis.PW_WORDLIST;
+  if (!Array.isArray(list) || list.length < 64) {
+    throw new Error("Passphrase wordlist is not loaded.");
+  }
+  const count = wordCount || 5;
+  if (count < 4 || count > 12) {
+    throw new Error("Passphrase must use 4 to 12 words.");
+  }
+  const words = [];
+  for (let i = 0; i < count; i += 1) {
+    words.push(list[randomInt(list.length)]);
+  }
+  return words.join(separator == null ? "-" : separator);
+}
+
 export function generateSecret(length) {
   const len = length || 20;
   const alphabet = LOWER + UPPER + DIGITS + SYMBOLS;

@@ -95,6 +95,7 @@
           <span id="sync-status">Local ciphertext only</span>
           <span class="badge" id="plan-badge">Local</span>
         </div>
+        <p class="idle-clock" id="idle-clock" aria-live="polite">Idle lock 5:00</p>
         <label class="visually-hidden" for="search">Search entries</label>
         <input id="search" type="search" placeholder="Search name, user, url, tags" autocomplete="off">
         <div class="sidebar-tools">
@@ -150,7 +151,8 @@
               <label for="entry-password">Password</label>
               <input id="entry-password" type="password" autocomplete="off" spellcheck="false">
               <div class="output-actions">
-                <button type="button" class="btn btn-ghost" id="entry-generate">Generate</button>
+                <button type="button" class="btn btn-ghost" id="entry-generate">Generate password</button>
+                <button type="button" class="btn btn-ghost" id="entry-passphrase">Generate passphrase</button>
                 <button type="button" class="btn btn-ghost" id="entry-reveal" aria-pressed="false">Reveal</button>
                 <button type="button" class="btn btn-ghost" id="entry-copy-password">Copy password</button>
                 <button type="button" class="btn btn-ghost" id="entry-copy-username">Copy username</button>
@@ -245,6 +247,7 @@
   </div>
 </footer>
 <noscript><p class="wrap fine">The vault needs JavaScript so encryption can run in your browser.</p></noscript>
+<script src="wordlist.js"></script>
 <script type="module" src="saas/vault-app.js"></script>
 </body>
 </html>

@@ -21,6 +21,8 @@ const state = {
   selectedId: null,
   dirty: false,
   idleTimer: null,
+  idleClockTimer: null,
+  idleUntil: 0,
   totpTimer: null,
   revealTimer: null,
   clipTimer: null,
@@ -54,6 +56,7 @@ function bind() {
     "search",
     "filter-fav",
     "btn-add",
+    "idle-clock",
     "btn-lock",
     "btn-export",
     "btn-kit",
@@ -78,6 +81,7 @@ function bind() {
     "entry-totp",
     "entry-favorite",
     "entry-generate",
+    "entry-passphrase",
     "entry-reveal",
     "entry-copy-password",
     "entry-copy-username",
@@ -127,6 +131,7 @@ function showApp() {
 
 function stopTimers() {
   window.clearTimeout(state.idleTimer);
+  window.clearInterval(state.idleClockTimer);
   window.clearInterval(state.totpTimer);
   window.clearTimeout(state.revealTimer);
   window.clearTimeout(state.clipTimer);
@@ -146,8 +151,27 @@ function lockVault(reason) {
   if (reason) setLockStatus(reason, "warn");
 }
 
+function formatIdle(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = String(total % 60).padStart(2, "0");
+  return minutes + ":" + seconds;
+}
+
+function tickIdleClock() {
+  if (!el["idle-clock"]) return;
+  if (!state.vaultKey || !state.idleUntil) {
+    el["idle-clock"].textContent = "Locked";
+    return;
+  }
+  const left = state.idleUntil - Date.now();
+  el["idle-clock"].textContent = left <= 0 ? "Locking…" : "Idle lock " + formatIdle(left);
+}
+
 function bumpIdle() {
   window.clearTimeout(state.idleTimer);
+  state.idleUntil = Date.now() + IDLE_MS;
+  tickIdleClock();
   state.idleTimer = window.setTimeout(function () {
     lockVault("Locked after 5 minutes idle.");
   }, IDLE_MS);
@@ -424,6 +448,9 @@ async function afterUnlock() {
   el["pane-empty"].hidden = false;
   window.clearInterval(state.totpTimer);
   state.totpTimer = window.setInterval(tickTotp, TOTP_TICK_MS);
+  window.clearInterval(state.idleClockTimer);
+  state.idleClockTimer = window.setInterval(tickIdleClock, 1000);
+  bumpIdle();
   if (state.account && state.account.pro) {
     try {
       const remote = await api.getVault();
@@ -755,6 +782,15 @@ function wire() {
     el["entry-password"].value = crypto.generateSecret(20);
     state.revealed = true;
     applyReveal();
+  });
+  el["entry-passphrase"].addEventListener("click", function () {
+    try {
+      el["entry-password"].value = crypto.generatePassphrase(5, "-");
+      state.revealed = true;
+      applyReveal();
+    } catch (err) {
+      ui.toast(err.message || "Could not generate a passphrase.", "error");
+    }
   });
   el["entry-reveal"].addEventListener("click", function () {
     state.revealed = !state.revealed;
