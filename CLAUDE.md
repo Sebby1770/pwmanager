@@ -4,8 +4,8 @@ A password manager in three parts that share a threat model but not code:
 
 | Path | What it is |
 |------|------------|
-| `pwmanager/` | Python CLI vault. `cli.py` (commands), `vault.py` (file format, entry ops), `crypto.py` (KDF, AEAD, file HMAC), `importers.py` (Bitwarden / 1Password / Chrome CSV), `totp.py`, `hibp.py`, `audit.py`. Works fully offline with no account. |
-| `saas/` | stdlib-only HTTP API + static server for the web vault. `server.py` (routes), `auth.py` (auth-key hashing, sessions, rate limits), `envelope.py` (validates ciphertext envelopes), `db.py` (SQLite), `stripeutil.py` (Checkout + webhooks), `schema.sql`. |
+| `pwmanager/` | Python CLI vault. `cli.py` (commands), `vault.py` (file format, entry ops), `crypto.py` (KDF, AEAD, file HMAC), `importers.py` (Bitwarden / 1Password / Chrome CSV, Bitwarden JSON), `totp.py`, `hibp.py`, `audit.py`. Works fully offline with no account. |
+| `saas/` | stdlib HTTP API + static server (only `webauthn` is an optional extra) for the web vault. `server.py` (routes), `auth.py` (auth-key hashing, sessions, rate limits), `envelope.py` (validates ciphertext envelopes), `db.py` (SQLite), `stripeutil.py` (Checkout + webhooks), `mfa.py` (passkey second factor + recovery codes), `schema.sql`. |
 | `web/` | Static site. `web/saas/*.js` is the zero-knowledge browser vault (ES modules, no bundler); `web/generator.js` + `web/app.js` are the standalone generator page. |
 | `tests/` | pytest suite (`tests/test_*.py`) and zero-dependency Node tests (`tests/js/*.mjs`). |
 
@@ -16,8 +16,8 @@ pip install -r requirements-dev.txt        # the SessionStart hook does this in 
 python -m pwmanager                         # interactive CLI; vault.json in the cwd
 python -m pwmanager --vault /tmp/x.vault.json add github --gen
 python -m saas                              # API + web on http://127.0.0.1:8787 (Stripe optional)
-python -m pytest -q                         # Python tests
-node tests/js/run.mjs && node tests/js/saas_crypto.mjs   # JS tests
+python -m pytest -q                         # Python tests (Playwright e2e skip if no Chromium)
+node tests/js/run.mjs && node tests/js/saas_crypto.mjs && node tests/js/saas_vault.mjs   # JS tests
 ```
 
 Stripe is disabled unless all four `PWMANAGER_STRIPE_*` env vars are set; the
@@ -36,6 +36,10 @@ API then returns 503 for checkout/webhook. Mark an account Pro in tests with
 8. Web: vault = AES-256-GCM(vaultKey, JSON) with AAD `pwmanager-vault-v1`, uploaded as `{v, nonce, ct, kdf}`; `envelope.py` rejects anything plaintext-shaped.
 9. Prelogin returns a deterministic HMAC-derived dummy salt for unknown emails so salts do not reveal which emails exist.
 10. Nothing derived from the master password other than `authKey` may reach the server, its logs, or error messages — keep it that way.
+
+Passkeys need an RP id that is a hostname: open http://localhost:8787 (not
+127.0.0.1). Tests drive WebAuthn with `tests/soft_authenticator.py` (server)
+and Chrome's CDP virtual authenticator (browser).
 
 ## Conventions
 

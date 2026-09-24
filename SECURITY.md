@@ -27,6 +27,16 @@ Not designed to resist:
 - Operator mistakes if you self-host without TLS
 - Stripe account takeover (affects billing, not vault plaintext)
 
+**Passkeys (3.3).** An account can register WebAuthn passkeys as a second
+factor for *cloud sign-in*. A correct `authKey` then yields only a single-use,
+five-minute ceremony; a session is issued after a valid assertion (origin, RP
+id, challenge, and a sign counter that must advance) or a one-time recovery
+code. This protects the ciphertext and the cloud copy against a phished or
+leaked master password. It does not change the vault crypto: the local vault
+still opens with the master password alone, and the server still never sees
+`vaultKey`. Adding or removing passkeys and regenerating recovery codes
+re-verify `authKey`. Recovery codes are 80-bit and stored as peppered HMACs.
+
 The operator **cannot** reset a forgotten master password. Card numbers are
 accepted only by Stripe Checkout, never by this process.
 

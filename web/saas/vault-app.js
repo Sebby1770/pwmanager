@@ -4,6 +4,7 @@ import * as crypto from "./crypto.js";
 import { totpAt, totpRemaining, formatCode } from "./totp.js";
 import * as ui from "./ui.js";
 import * as vault from "./vault.js";
+import * as passkey from "./webauthn.js";
 
 const IDLE_MS = 5 * 60 * 1000;
 const CLIP_MS = 20000;
@@ -106,7 +107,14 @@ function bind() {
     "hibp-result",
     "account-close",
     "help-dialog",
-    "help-close"
+    "help-close",
+    "passkey-section",
+    "passkey-list",
+    "btn-passkey-add",
+    "btn-recovery-regen",
+    "recovery-box",
+    "recovery-codes",
+    "passkey-status"
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -165,6 +173,8 @@ function wipeDecryptedDom() {
   }
   if (el["hibp-result"]) el["hibp-result"].textContent = "";
   if (el["totp-display"]) el["totp-display"].textContent = "";
+  hideRecoveryCodes();
+  if (el["passkey-list"]) el["passkey-list"].textContent = "";
   if (el["totp-wrap"]) el["totp-wrap"].hidden = true;
   if (el["pane-detail"]) el["pane-detail"].hidden = true;
   if (el["pane-empty"]) el["pane-empty"].hidden = false;
@@ -477,6 +487,137 @@ function renderAccount() {
     account.plan +
     (account.plan_status ? " (" + account.plan_status + ")" : "") +
     ". Cloud sync stores ciphertext only.";
+  renderPasskeys();
+}
+
+/* ---------------------------------------------------------------- passkeys */
+
+function setPasskeyStatus(message, kind) {
+  if (!el["passkey-status"]) return;
+  el["passkey-status"].textContent = message || "";
+  el["passkey-status"].dataset.kind = kind || "";
+}
+
+function hideRecoveryCodes() {
+  if (el["recovery-codes"]) el["recovery-codes"].textContent = "";
+  if (el["recovery-box"]) el["recovery-box"].hidden = true;
+}
+
+function showRecoveryCodes(codes) {
+  el["recovery-codes"].textContent = codes.join("\n");
+  el["recovery-box"].hidden = false;
+}
+
+async function renderPasskeys() {
+  const section = el["passkey-section"];
+  if (!section) return;
+  section.hidden = !state.account;
+  if (!state.account) return;
+  el["btn-passkey-add"].disabled = !passkey.supported();
+  if (!passkey.supported()) setPasskeyStatus("This browser does not support passkeys.", "warn");
+  let listing;
+  try {
+    listing = await api.passkeys();
+  } catch (err) {
+    setPasskeyStatus(err.message || "Could not load passkeys.", "error");
+    return;
+  }
+  const list = el["passkey-list"];
+  list.textContent = "";
+  listing.credentials.forEach(function (cred) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = cred.name + (cred.last_used_at ? " · last used " + ui.formatWhen(Date.parse(cred.last_used_at)) : "");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn btn-ghost";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", function () {
+      removePasskey(cred);
+    });
+    li.appendChild(label);
+    li.appendChild(remove);
+    list.appendChild(li);
+  });
+  const on = listing.credentials.length > 0;
+  el["btn-recovery-regen"].hidden = !on;
+  if (on) {
+    setPasskeyStatus(listing.recovery_codes_left + " recovery codes left.", listing.recovery_codes_left < 3 ? "warn" : "");
+  } else if (passkey.supported()) {
+    setPasskeyStatus("No passkeys yet: the master password alone signs in to the cloud.", "");
+  }
+}
+
+async function addPasskey() {
+  hideRecoveryCodes();
+  try {
+    const opts = await api.passkeyOptions();
+    const credential = await passkey.createPasskey(opts.publicKey);
+    const name = (navigator.platform || "Passkey").slice(0, 40);
+    const result = await api.passkeyRegister(opts.ceremony, credential, name, state.authKeyB64);
+    if (result.recovery_codes) showRecoveryCodes(result.recovery_codes);
+    ui.toast("Passkey added. Cloud sign-in now needs it.");
+    state.account.mfa_enabled = true;
+  } catch (err) {
+    setPasskeyStatus(err.name === "NotAllowedError" ? "Passkey creation was cancelled." : err.message || "Could not add passkey.", "error");
+    return;
+  }
+  await renderPasskeys();
+}
+
+async function removePasskey(cred) {
+  if (!window.confirm("Remove passkey \u201c" + cred.name + "\u201d? If it is the last one, the master password alone will sign in again.")) {
+    return;
+  }
+  try {
+    const result = await api.deletePasskey(cred.id, state.authKeyB64);
+    state.account.mfa_enabled = result.mfa_enabled;
+    if (!result.mfa_enabled) hideRecoveryCodes();
+    ui.toast("Passkey removed.");
+  } catch (err) {
+    setPasskeyStatus(err.message || "Could not remove passkey.", "error");
+  }
+  await renderPasskeys();
+}
+
+async function regenerateRecovery() {
+  if (!window.confirm("Replace all recovery codes? The old ones stop working immediately.")) return;
+  try {
+    const result = await api.regenerateRecoveryCodes(state.authKeyB64);
+    showRecoveryCodes(result.recovery_codes);
+  } catch (err) {
+    setPasskeyStatus(err.message || "Could not create recovery codes.", "error");
+  }
+  await renderPasskeys();
+}
+
+/**
+ * Second sign-in step. Returns the account, or null to continue local-only.
+ * Never blocks unlocking the local vault: that needs only the master password.
+ */
+async function completeSecondFactor(challenge) {
+  try {
+    if (!passkey.supported()) throw new Error("no passkeys in this browser");
+    const assertion = await passkey.getPasskey(challenge.publicKey);
+    const session = await api.loginWebauthn(challenge.ceremony, assertion);
+    return session.account;
+  } catch (err) {
+    const code = window.prompt(
+      "Cloud sign-in needs your passkey. Enter a recovery code instead, or cancel to keep working on this device only."
+    );
+    if (!code) return null;
+    try {
+      // The passkey attempt consumed the ceremony; ask for a fresh one.
+      const again = await api.login(state.email, state.authKeyB64);
+      if (!again.mfa_required) return again.account;
+      const session = await api.loginRecovery(again.ceremony, code);
+      ui.toast("Signed in with a recovery code. " + session.account.recovery_codes_left + " left.", "warn");
+      return session.account;
+    } catch (inner) {
+      ui.toast(inner.message || "Recovery code rejected.", "error");
+      return null;
+    }
+  }
 }
 
 async function afterUnlock() {
@@ -584,7 +725,7 @@ async function unlock(event) {
     state.account = null;
     try {
       const session = await api.login(email, state.authKeyB64);
-      state.account = session.account;
+      state.account = session.mfa_required ? await completeSecondFactor(session) : session.account;
     } catch (err) {
       /* local-only is fine */
     }
@@ -644,7 +785,7 @@ async function createVault(event) {
         if (err.status === 409) {
           try {
             const session = await api.login(email, state.authKeyB64);
-            state.account = session.account;
+            state.account = session.mfa_required ? await completeSecondFactor(session) : session.account;
           } catch (loginErr) {
             setLockStatus(
               "Local vault created, but that email already has a cloud account with a different master password.",
@@ -885,6 +1026,8 @@ function wire() {
     }
   });
   el["btn-hibp"].addEventListener("click", hibpCheck);
+  el["btn-passkey-add"].addEventListener("click", addPasskey);
+  el["btn-recovery-regen"].addEventListener("click", regenerateRecovery);
   el["account-close"].addEventListener("click", function () {
     closeDialog(el["account-dialog"]);
   });

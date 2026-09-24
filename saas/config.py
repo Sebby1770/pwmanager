@@ -62,6 +62,8 @@ class Config:
     secure_cookies: bool = False
     trust_proxy: bool = False
     request_timeout: float = REQUEST_TIMEOUT_SECONDS
+    # Passkeys: RP id defaults to the public URL's host (localhost for IPs).
+    webauthn_rp_id: str = ""
 
     @property
     def stripe_configured(self) -> bool:
@@ -107,6 +109,7 @@ def load_config(overrides: Optional[dict] = None) -> Config:
         cors_origins=cors,
         secure_cookies=secure,
         trust_proxy=_env("PWMANAGER_TRUST_PROXY", "").lower() in {"1", "true", "yes"},
+        webauthn_rp_id=_env("PWMANAGER_WEBAUTHN_RP_ID"),
     )
     if overrides:
         for key, value in overrides.items():

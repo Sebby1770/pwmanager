@@ -49,6 +49,7 @@ from saas.config import (
 )
 from saas.db import Database, account_public, blob_to_envelope, is_pro
 from saas.envelope import EnvelopeError, envelope_byte_size, envelope_parts, parse_envelope
+from saas.mfa import Mfa, MfaError, rp_for
 from saas.stripeutil import (
     StripeError,
     apply_webhook_event,
@@ -92,6 +93,8 @@ class App:
         self.cfg = cfg or load_config()
         self.db = db or Database(self.cfg.db_path)
         self.web_root = Path(self.cfg.web_root).resolve()
+        rp_id, origins = rp_for(self.cfg.public_url, self.cfg.webauthn_rp_id, self.cfg.cors_origins)
+        self.mfa = Mfa(self.db, rp_id, origins)
 
 
 class _ClientGone(Exception):
@@ -236,6 +239,8 @@ def make_handler(app: App):
                     self._api(self.command, path)
                 except _ClientGone:
                     return
+                except MfaError as exc:
+                    self._error(exc.status, exc.code, str(exc))
                 except EnvelopeError as exc:
                     self._error(400, "bad_envelope", str(exc))
                 except StripeError as exc:
@@ -365,6 +370,27 @@ def make_handler(app: App):
             if method == "POST" and path == "/api/login":
                 self._login()
                 return
+            if method == "POST" and path == "/api/login/webauthn":
+                self._login_webauthn()
+                return
+            if method == "POST" and path == "/api/login/recovery":
+                self._login_recovery()
+                return
+            if method == "POST" and path == "/api/webauthn/register/options":
+                self._webauthn_register_options()
+                return
+            if method == "POST" and path == "/api/webauthn/register/verify":
+                self._webauthn_register_verify()
+                return
+            if method == "GET" and path == "/api/webauthn/credentials":
+                self._webauthn_list()
+                return
+            if method == "POST" and path == "/api/webauthn/credentials/delete":
+                self._webauthn_delete()
+                return
+            if method == "POST" and path == "/api/webauthn/recovery-codes":
+                self._webauthn_recovery_codes()
+                return
             if method == "POST" and path == "/api/logout":
                 self._logout()
                 return
@@ -426,7 +452,7 @@ def make_handler(app: App):
             self.app.db.audit(account["id"], "register", self._client_ip())
             self._json(
                 201,
-                {"account": account_public(account)},
+                {"account": self._public(account)},
                 extra=[("Set-Cookie", self._cookie(token))],
             )
 
@@ -481,15 +507,129 @@ def make_handler(app: App):
             if account is None:
                 self._error(401, "invalid_credentials", "Email or master password is incorrect")
                 return
-            token = self.app.db.create_session(account["id"], self.headers.get("User-Agent") or "")
-            self.app.db.touch_login(account["id"])
-            self.app.db.audit(account["id"], "login", self._client_ip())
-            account = self.app.db.get_account_by_id(account["id"])
+            if self.app.mfa.enabled(account["id"]):
+                # Correct authKey, but no session until the passkey step.
+                self.app.db.audit(account["id"], "login_mfa_challenge", self._client_ip())
+                self._json(200, self.app.mfa.login_options(account["id"]))
+                return
+            self._start_session(account["id"], "login")
+
+        def _start_session(self, account_id: str, event: str) -> None:
+            token = self.app.db.create_session(account_id, self.headers.get("User-Agent") or "")
+            self.app.db.touch_login(account_id)
+            self.app.db.audit(account_id, event, self._client_ip())
+            account = self.app.db.get_account_by_id(account_id)
             self._json(
                 200,
-                {"account": account_public(account)},
+                {"account": self._public(account)},
                 extra=[("Set-Cookie", self._cookie(token))],
             )
+
+        def _public(self, account) -> Dict[str, Any]:
+            pub = account_public(account)
+            pub["mfa_enabled"] = self.app.mfa.enabled(account["id"])
+            if pub["mfa_enabled"]:
+                pub["recovery_codes_left"] = self.app.mfa.remaining_recovery_codes(account["id"])
+            return pub
+
+        def _mfa_limited(self) -> bool:
+            if self.app.db.limited(self._rate_key("mfa"), limit=10, window=60):
+                self._error(429, "rate_limited", "Too many sign-in attempts. Try again in a minute.")
+                return True
+            return False
+
+        def _login_webauthn(self) -> None:
+            if self._mfa_limited():
+                return
+            body = self._json_body()
+            if body is None:
+                return
+            account_id = self.app.mfa.verify_login(str(body.get("ceremony") or ""), body.get("credential"))
+            self._start_session(account_id, "login_passkey")
+
+        def _login_recovery(self) -> None:
+            if self._mfa_limited():
+                return
+            body = self._json_body()
+            if body is None:
+                return
+            account_id = self.app.mfa.verify_recovery(str(body.get("ceremony") or ""), str(body.get("code") or ""))
+            self._start_session(account_id, "login_recovery_code")
+
+        def _reauth(self, account, body: dict) -> bool:
+            """Destructive or factor-changing actions re-prove the master password."""
+            # Own bucket, so managing passkeys does not use up sign-in attempts.
+            if self.app.db.limited(self._rate_key("reauth"), limit=10, window=60):
+                self._error(429, "rate_limited", "Too many attempts. Try again in a minute.")
+                return False
+            try:
+                auth_key = decode_auth_key(str(body.get("auth_key") or ""))
+            except ValueError:
+                self._error(401, "reauth_required", "Re-enter your master password to continue")
+                return False
+            if not verify_auth_key(account["auth_verifier"], auth_key):
+                self._error(401, "reauth_required", "Re-enter your master password to continue")
+                return False
+            return True
+
+        def _webauthn_register_options(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            if self._json_body() is None:
+                return
+            self._json(200, self.app.mfa.registration_options(account))
+
+        def _webauthn_register_verify(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            body = self._json_body()
+            if body is None or not self._reauth(account, body):
+                return
+            result = self.app.mfa.register(
+                account, str(body.get("ceremony") or ""), body.get("credential"), str(body.get("name") or "")
+            )
+            self.app.db.audit(account["id"], "passkey_added", self._client_ip())
+            self._json(201, result)
+
+        def _webauthn_list(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            self._json(
+                200,
+                {
+                    "credentials": self.app.mfa.public_credentials(account["id"]),
+                    "recovery_codes_left": self.app.mfa.remaining_recovery_codes(account["id"]),
+                },
+            )
+
+        def _webauthn_delete(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            body = self._json_body()
+            if body is None or not self._reauth(account, body):
+                return
+            if not self.app.mfa.delete_credential(account["id"], str(body.get("id") or "")):
+                self._error(404, "not_found", "No such passkey on this account")
+                return
+            self.app.db.audit(account["id"], "passkey_removed", self._client_ip())
+            self._json(200, {"ok": True, "mfa_enabled": self.app.mfa.enabled(account["id"])})
+
+        def _webauthn_recovery_codes(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            body = self._json_body()
+            if body is None or not self._reauth(account, body):
+                return
+            if not self.app.mfa.enabled(account["id"]):
+                self._error(400, "mfa_not_enabled", "Add a passkey before generating recovery codes")
+                return
+            self.app.db.audit(account["id"], "recovery_codes_regenerated", self._client_ip())
+            self._json(200, {"recovery_codes": self.app.mfa.new_recovery_codes(account["id"])})
 
         def _logout(self) -> None:
             account, token = self._current_account()
@@ -503,7 +643,7 @@ def make_handler(app: App):
             account, _token = self._require_account()
             if account is None:
                 return
-            self._json(200, {"account": account_public(account)})
+            self._json(200, {"account": self._public(account)})
 
         def _vault_put(self) -> None:
             account, _token = self._require_account()
@@ -611,19 +751,11 @@ def make_handler(app: App):
                 return
             # Deleting wipes every revision, so a session cookie alone is not
             # enough: the caller must prove they still hold the master password.
-            if self.app.db.limited(self._rate_key("login")):
-                self._error(429, "rate_limited", "Too many attempts. Try again in a minute.")
-                return
-            try:
-                auth_key = decode_auth_key(str(body.get("auth_key") or ""))
-            except ValueError:
-                self._error(401, "reauth_required", "Re-enter your master password to delete this account")
-                return
-            if not verify_auth_key(account["auth_verifier"], auth_key):
-                self._error(401, "reauth_required", "Re-enter your master password to delete this account")
+            if not self._reauth(account, body):
                 return
             account_id = account["id"]
             self.app.db.audit(account_id, "delete_account", self._client_ip())
+            self.app.mfa.delete_all(account_id)
             self.app.db.delete_account(account_id)
             extra = [("Set-Cookie", self._cookie(token or "", delete=True))] if token else None
             self._json(200, {"ok": True, "deleted": True}, extra=extra)

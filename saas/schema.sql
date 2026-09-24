@@ -84,3 +84,39 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     window_start INTEGER NOT NULL,
     count INTEGER NOT NULL
 );
+
+-- Passkeys (WebAuthn) as a second factor for cloud sign-in. Public keys only.
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key TEXT NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports TEXT,
+    name TEXT,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_webauthn_account ON webauthn_credentials(account_id);
+
+-- Single-use WebAuthn challenges, keyed by a hashed ceremony token.
+CREATE TABLE IF NOT EXISTS mfa_ceremonies (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    purpose TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+-- One-time recovery codes (HMAC-peppered hashes; 80-bit codes).
+CREATE TABLE IF NOT EXISTS recovery_codes (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    code_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_account ON recovery_codes(account_id);
