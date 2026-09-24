@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     plan TEXT NOT NULL DEFAULT 'free',
     plan_status TEXT,
     plan_period_end TEXT,
+    plan_event_at INTEGER,
     deleted_at TEXT,
     CHECK (plan IN ('free', 'pro'))
 );

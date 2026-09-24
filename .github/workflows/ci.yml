@@ -26,6 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
 
       - name: Run tests
         run: python -m pytest tests/ -q
@@ -39,7 +40,9 @@ jobs:
         run: node tests/js/run.mjs
 
       - name: Run SaaS browser-crypto tests
-        run: node tests/js/saas_crypto.mjs
+        run: |
+          node tests/js/saas_crypto.mjs
+          node tests/js/saas_vault.mjs
 
       - name: Check the bundled web wordlist is in sync
         run: |

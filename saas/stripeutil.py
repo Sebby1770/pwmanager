@@ -17,6 +17,20 @@ from saas.db import Database, is_pro
 STRIPE_API = "https://api.stripe.com/v1"
 SIGN_TOLERANCE = 300
 
+PAID_STATUSES = frozenset({"paid", "no_payment_required"})
+PLAN_EVENTS = frozenset(
+    {
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+        "checkout.session.async_payment_failed",
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "customer.subscription.canceled",
+        "invoice.payment_failed",
+    }
+)
+
 
 class StripeError(RuntimeError):
     def __init__(self, message: str, status: int = 502):
@@ -186,29 +200,65 @@ def apply_webhook_event(db: Database, event: dict) -> Dict[str, Any]:
     if account is None:
         return {"ok": True, "ignored": True, "reason": "unknown_account"}
 
+    if event_type not in PLAN_EVENTS:
+        return {"ok": True, "ignored": True, "reason": "unhandled_type"}
+
+    # Stripe does not deliver events in order and retries for days. Only an
+    # event at least as new as the last one applied may change the plan, or a
+    # late "active" update could undo a cancellation.
+    created = _event_created(event)
+    last = account["plan_event_at"]
+    if created is not None and last is not None and created < int(last):
+        return {"ok": True, "ignored": True, "reason": "stale_event"}
+
+    customer_id = str(data.get("customer")) if data.get("customer") else None
     if event_type == "checkout.session.completed":
-        customer_id = data.get("customer")
-        if customer_id:
-            db.set_stripe_customer(account["id"], str(customer_id))
-        db.set_plan(account["id"], "pro", status="active", stripe_customer_id=str(customer_id) if customer_id else None)
+        # With async payment methods (BECS/SEPA debit) the session completes
+        # before any money moves; payment_status is "unpaid" until the
+        # async_payment_succeeded event arrives.
+        if str(data.get("payment_status") or "") in PAID_STATUSES:
+            db.set_plan(account["id"], "pro", status="active", stripe_customer_id=customer_id, event_at=created)
+        elif customer_id:
+            db.set_stripe_customer(account["id"], customer_id)
+    elif event_type == "checkout.session.async_payment_succeeded":
+        db.set_plan(account["id"], "pro", status="active", stripe_customer_id=customer_id, event_at=created)
+    elif event_type == "checkout.session.async_payment_failed":
+        if account["plan"] != "pro":
+            db.set_plan(account["id"], "free", status="payment_failed", stripe_customer_id=customer_id, event_at=created)
     elif event_type in {"customer.subscription.created", "customer.subscription.updated"}:
         status = str(data.get("status") or "active")
         period_end = _period_end_iso(data.get("current_period_end"))
-        customer_id = data.get("customer")
         plan = "pro" if status in {"active", "trialing", "past_due"} else "free"
         db.set_plan(
             account["id"],
             plan,
             status=status,
             period_end=period_end,
-            stripe_customer_id=str(customer_id) if customer_id else None,
+            stripe_customer_id=customer_id,
+            event_at=created,
         )
     elif event_type in {"customer.subscription.deleted", "customer.subscription.canceled"}:
-        db.set_plan(account["id"], "free", status="canceled")
+        db.set_plan(account["id"], "free", status="canceled", event_at=created)
     elif event_type == "invoice.payment_failed":
-        db.set_plan(account["id"], "pro" if is_pro(account) else account["plan"], status="past_due")
+        db.set_plan(
+            account["id"],
+            "pro" if is_pro(account) else account["plan"],
+            status="past_due",
+            period_end=account["plan_period_end"],
+            event_at=created,
+        )
 
     return {"ok": True, "applied": event_type, "account_id": account["id"]}
+
+
+def _event_created(event: dict) -> Optional[int]:
+    value = event.get("created")
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def event_from_payload(payload: bytes) -> dict:

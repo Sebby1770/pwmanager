@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 from saas.config import (
     AUTH_KEY_BYTES,
     KDF_ITERATIONS,
+    KDF_ITERATIONS_MAX,
     RATE_LIMIT_MAX,
     RATE_LIMIT_WINDOW,
     SALT_BYTES,
@@ -216,3 +217,37 @@ def default_kdf_params() -> dict:
         "salt_bytes": SALT_BYTES,
         "email_mix": "sha256(salt||email)",
     }
+
+
+def canonical_kdf_params(params) -> dict:
+    """Validate client-supplied KDF params and return the canonical form.
+
+    Only the iteration count is taken from the client, and only inside
+    [KDF_ITERATIONS, KDF_ITERATIONS_MAX]. Everything else is fixed by the
+    protocol, so unknown keys are dropped rather than stored and echoed back.
+    """
+    if params is None:
+        return default_kdf_params()
+    if not isinstance(params, dict):
+        raise ValueError("kdf_params must be an object")
+    alg = str(params.get("alg") or "PBKDF2-HMAC-SHA256").upper()
+    if alg != "PBKDF2-HMAC-SHA256":
+        raise ValueError("kdf_params.alg must be PBKDF2-HMAC-SHA256")
+    raw = params.get("iterations", KDF_ITERATIONS)
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ValueError("kdf iterations must be an integer")
+    try:
+        iterations = int(raw)
+    except ValueError as exc:
+        raise ValueError("kdf iterations must be an integer") from exc
+    if iterations < KDF_ITERATIONS:
+        raise ValueError(f"kdf iterations must be at least {KDF_ITERATIONS}")
+    if iterations > KDF_ITERATIONS_MAX:
+        raise ValueError(f"kdf iterations must be at most {KDF_ITERATIONS_MAX}")
+    out = default_kdf_params()
+    out["iterations"] = iterations
+    return out
+
+
+def hash_email(email: str, pepper: bytes) -> str:
+    return hmac.new(pepper, ("email|" + normalize_email(email)).encode("utf-8"), hashlib.sha256).hexdigest()

@@ -54,6 +54,10 @@ class Database:
         sql = SCHEMA_PATH.read_text(encoding="utf-8")
         with self._lock:
             self._conn.executescript(sql)
+            # Additive migrations for databases created by earlier releases.
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(accounts)")}
+            if "plan_event_at" not in columns:
+                self._conn.execute("ALTER TABLE accounts ADD COLUMN plan_event_at INTEGER")
 
     def _load_or_create_pepper(self) -> bytes:
         with self._lock:
@@ -149,19 +153,22 @@ class Database:
         status: Optional[str] = None,
         period_end: Optional[str] = None,
         stripe_customer_id: Optional[str] = None,
+        event_at: Optional[int] = None,
     ) -> None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
             if row is None:
                 return
             customer = stripe_customer_id if stripe_customer_id is not None else row["stripe_customer_id"]
+            stamp = event_at if event_at is not None else row["plan_event_at"]
             self._conn.execute(
                 """
                 UPDATE accounts
-                SET plan = ?, plan_status = ?, plan_period_end = ?, stripe_customer_id = ?
+                SET plan = ?, plan_status = ?, plan_period_end = ?, stripe_customer_id = ?,
+                    plan_event_at = ?
                 WHERE id = ?
                 """,
-                (plan, status, period_end, customer, account_id),
+                (plan, status, period_end, customer, stamp, account_id),
             )
 
     def set_stripe_customer(self, account_id: str, customer_id: str) -> None:

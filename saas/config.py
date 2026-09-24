@@ -19,11 +19,20 @@ DEFAULT_PORT = 8787
 FREE_VAULT_MAX_BYTES = 2 * 1024 * 1024
 PRO_VAULT_MAX_BYTES = 8 * 1024 * 1024
 HTTP_BODY_MAX_BYTES = PRO_VAULT_MAX_BYTES + 64 * 1024
+# Every route except PUT /api/vault takes a small JSON object.
+JSON_BODY_MAX_BYTES = 16 * 1024
+WEBHOOK_BODY_MAX_BYTES = 512 * 1024
+REQUEST_TIMEOUT_SECONDS = 30
 REVISION_CAP = 20
 SESSION_SECONDS = 14 * 24 * 3600
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX = 5
 KDF_ITERATIONS = 600_000
+# The browser always derives with KDF_ITERATIONS; stored values above this are
+# refused so an account cannot be made to advertise an absurd work factor.
+KDF_ITERATIONS_MAX = 10_000_000
+LOGIN_ACCOUNT_LIMIT = 10
+LOGIN_ACCOUNT_WINDOW = 300
 SALT_BYTES = 32
 AUTH_KEY_BYTES = 32
 
@@ -52,6 +61,7 @@ class Config:
     cors_origins: List[str] = field(default_factory=list)
     secure_cookies: bool = False
     trust_proxy: bool = False
+    request_timeout: float = REQUEST_TIMEOUT_SECONDS
 
     @property
     def stripe_configured(self) -> bool:

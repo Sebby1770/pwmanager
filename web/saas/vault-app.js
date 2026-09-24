@@ -26,6 +26,7 @@ const state = {
   totpTimer: null,
   revealTimer: null,
   clipTimer: null,
+  clipValue: "",
   revealed: false,
   health: null
 };
@@ -137,13 +138,47 @@ function stopTimers() {
   window.clearTimeout(state.clipTimer);
 }
 
+function flushClipboard() {
+  // stopTimers() cancels the pending auto-clear, so a lock inside the 20 s
+  // window used to leave the secret on the clipboard indefinitely.
+  const pending = state.clipValue;
+  state.clipValue = "";
+  window.clearTimeout(state.clipTimer);
+  if (pending) {
+    ui.clearClipboardIfUnchanged(pending).catch(function () {});
+  }
+}
+
+function wipeDecryptedDom() {
+  // Hidden is not gone: every decrypted value written into the DOM stays
+  // readable (devtools, extensions, a later XSS) until it is overwritten.
+  if (el["entry-form"]) el["entry-form"].reset();
+  ["entry-id", "entry-name", "entry-username", "entry-password", "entry-url", "entry-notes", "entry-tags", "entry-totp", "search"].forEach(
+    function (id) {
+      if (el[id]) el[id].value = "";
+    }
+  );
+  if (el["entry-list"]) el["entry-list"].textContent = "";
+  if (el["audit-panel"]) {
+    el["audit-panel"].replaceChildren();
+    el["audit-panel"].hidden = true;
+  }
+  if (el["hibp-result"]) el["hibp-result"].textContent = "";
+  if (el["totp-display"]) el["totp-display"].textContent = "";
+  if (el["totp-wrap"]) el["totp-wrap"].hidden = true;
+  if (el["pane-detail"]) el["pane-detail"].hidden = true;
+  if (el["pane-empty"]) el["pane-empty"].hidden = false;
+  if (el["view-app"]) el["view-app"].dataset.ready = "false";
+}
+
 function lockVault(reason) {
+  flushClipboard();
   state.vaultKey = null;
   state.authKeyB64 = "";
   state.data = null;
   state.selectedId = null;
   state.revealed = false;
-  if (el["entry-password"]) el["entry-password"].value = "";
+  wipeDecryptedDom();
   if (el["unlock-password"]) el["unlock-password"].value = "";
   if (el["create-password"]) el["create-password"].value = "";
   if (el["create-password2"]) el["create-password2"].value = "";
@@ -187,6 +222,8 @@ function setMode(mode) {
 
 async function persist() {
   if (!state.vaultKey || !state.data || !state.email) return;
+  // Inside the ciphertext, so the server cannot forge or reorder it.
+  state.data.saved_at = Date.now();
   const envelope = await crypto.encryptVault(state.vaultKey, state.data, state.saltB64);
   await vault.idbPut(state.email, envelope);
   state.dirty = false;
@@ -367,9 +404,11 @@ async function copyField(value, label) {
     return;
   }
   await ui.copyText(value);
-  ui.toast(label + " copied — clipboard clears in 20 seconds.");
+  ui.toast(label + " copied — clipboard clears in 20 seconds (or when the vault locks).");
   window.clearTimeout(state.clipTimer);
+  state.clipValue = value;
   state.clipTimer = window.setTimeout(function () {
+    state.clipValue = "";
     ui.clearClipboardIfUnchanged(value).then(function () {
       ui.toast("Clipboard cleared.");
     });
@@ -441,6 +480,7 @@ function renderAccount() {
 }
 
 async function afterUnlock() {
+  el["view-app"].dataset.ready = "false";
   showApp();
   renderList();
   renderAccount();
@@ -456,14 +496,18 @@ async function afterUnlock() {
       const remote = await api.getVault();
       if (remote.envelope) {
         const decrypted = await crypto.decryptVault(state.vaultKey, remote.envelope);
-        const remoteTs = Number(remote.envelope.updated_at) || 0;
-        const localRecord = await vault.idbGet(state.email);
-        const localTs = localRecord && localRecord.envelope ? Number(localRecord.envelope.updated_at) || 0 : 0;
-        if (remoteTs >= localTs) {
+        // Compare the timestamps sealed inside each ciphertext. The envelope's
+        // own updated_at is server-supplied (and was an ISO string, so the old
+        // Number() comparison was always NaN → 0 and the cloud copy never won).
+        if (vault.pickNewer(state.data, decrypted) === "remote") {
           state.data = decrypted;
           await vault.idbPut(state.email, remote.envelope);
           el["sync-status"].textContent = "Loaded cloud copy";
           renderList();
+        } else if (vault.savedAt(state.data) > vault.savedAt(decrypted)) {
+          // The cloud copy is older than this device's (or was rolled back):
+          // keep local and push it so the cloud catches up.
+          await persist();
         }
       }
     } catch (err) {
@@ -472,6 +516,8 @@ async function afterUnlock() {
       }
     }
   }
+  // Lets tests (and anything else) know the initial cloud pull has settled.
+  el["view-app"].dataset.ready = "true";
 }
 
 function setBusy(busy) {
@@ -830,7 +876,7 @@ function wire() {
       return;
     }
     try {
-      await api.deleteAccount();
+      await api.deleteAccount(state.authKeyB64);
       ui.toast("Cloud account deleted.");
       state.account = null;
       renderAccount();

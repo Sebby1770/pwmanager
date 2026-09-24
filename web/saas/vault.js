@@ -171,3 +171,18 @@ export function applyPasswordChange(entry, nextPassword) {
   entry.updated_at = Date.now() / 1000;
   return entry;
 }
+
+/** Milliseconds timestamp sealed inside a decrypted vault document (0 if absent). */
+export function savedAt(doc) {
+  const value = doc && Number(doc.saved_at);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Decide which decrypted copy to keep after unlock. Both timestamps come from
+ * inside AES-GCM ciphertext, so a server can replay an old copy but cannot
+ * make it look newer than what this device already has.
+ */
+export function pickNewer(localDoc, remoteDoc) {
+  return savedAt(remoteDoc) >= savedAt(localDoc) ? "remote" : "local";
+}
