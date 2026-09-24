@@ -3,3 +3,4 @@
 -e .[test,full]
 hypothesis>=6.100
 pytest-cov>=5
+playwright>=1.44

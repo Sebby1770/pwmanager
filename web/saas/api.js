@@ -98,8 +98,9 @@ export async function checkout(interval) {
   return request("POST", "/api/checkout", { interval: interval });
 }
 
-export async function deleteAccount() {
-  return request("POST", "/api/account/delete", { confirm: "DELETE" });
+export async function deleteAccount(authKeyB64) {
+  // The server re-checks the auth key: a session cookie alone cannot delete.
+  return request("POST", "/api/account/delete", { confirm: "DELETE", auth_key: authKeyB64 });
 }
 
 export async function exportAccount() {

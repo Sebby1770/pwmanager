@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,19 +26,25 @@ if __package__ is None:  # python saas/server.py
 
 from saas import __version__
 from saas.auth import (
+    canonical_kdf_params,
     decode_auth_key,
     decode_salt,
-    default_kdf_params,
+    hash_email,
     isoformat,
     normalize_email,
     valid_email,
+    verify_auth_key,
 )
 from saas.config import (
     Config,
     FREE_VAULT_MAX_BYTES,
     HTTP_BODY_MAX_BYTES,
+    JSON_BODY_MAX_BYTES,
+    LOGIN_ACCOUNT_LIMIT,
+    LOGIN_ACCOUNT_WINDOW,
     PRO_VAULT_MAX_BYTES,
     WEB_DIR,
+    WEBHOOK_BODY_MAX_BYTES,
     load_config,
 )
 from saas.db import Database, account_public, blob_to_envelope, is_pro
@@ -53,6 +60,12 @@ from saas.stripeutil import (
 )
 
 COOKIE_NAME = "pwmanager_session"
+
+# Routes that change state on behalf of a signed-in browser. They get an Origin
+# check and must be JSON, so a cross-site <form> cannot reach them even from a
+# same-site origin (where SameSite=Strict does not help) or an older browser.
+# The Stripe webhook is exempt: it is authenticated by its own HMAC.
+CSRF_EXEMPT = frozenset({"/api/stripe/webhook"})
 
 SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
@@ -81,21 +94,31 @@ class App:
         self.web_root = Path(self.cfg.web_root).resolve()
 
 
+class _ClientGone(Exception):
+    """The client stopped sending mid-body; drop the connection silently."""
+
+
 def make_handler(app: App):
     application = app
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         app = application
+        # Applied to the socket by StreamRequestHandler.setup(): a client that
+        # stalls mid-headers or mid-body is dropped instead of pinning a thread.
+        timeout = application.cfg.request_timeout
 
         def log_message(self, fmt: str, *args) -> None:
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
         def _client_ip(self) -> str:
             if self.app.cfg.trust_proxy:
+                # The proxy appends the address it saw; everything to the left
+                # of that came from the client and can be forged at will.
                 forwarded = self.headers.get("X-Forwarded-For", "")
-                if forwarded:
-                    return forwarded.split(",")[0].strip()
+                hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+                if hops:
+                    return hops[-1]
             return self.client_address[0]
 
         def _origin_allowed(self) -> Optional[str]:
@@ -190,8 +213,12 @@ def make_handler(app: App):
             parsed = urlparse(self.path)
             path = parsed.path or "/"
             if path.startswith("/api/"):
+                if not self._csrf_ok(path):
+                    return
                 try:
                     self._api(self.command, path)
+                except _ClientGone:
+                    return
                 except EnvelopeError as exc:
                     self._error(400, "bad_envelope", str(exc))
                 except StripeError as exc:
@@ -210,6 +237,21 @@ def make_handler(app: App):
                 return
             self._static(path)
 
+        def _csrf_ok(self, path: str) -> bool:
+            if self.command not in {"POST", "PUT"} or path in CSRF_EXEMPT:
+                return True
+            if self.headers.get("Origin") and self._origin_allowed() is None:
+                self._error(403, "origin_forbidden", "Cross-origin requests are not allowed")
+                self.close_connection = True
+                return False
+            has_body = (self.headers.get("Content-Length") or "0").strip() not in {"", "0"}
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if has_body and ctype != "application/json":
+                self._error(415, "unsupported_media_type", "Request body must be application/json")
+                self.close_connection = True
+                return False
+            return True
+
         def _read_body(self, max_size: int = HTTP_BODY_MAX_BYTES) -> Optional[bytes]:
             raw_len = self.headers.get("Content-Length", "0") or "0"
             try:
@@ -219,11 +261,22 @@ def make_handler(app: App):
                 return None
             if length < 0 or length > max_size:
                 self._error(413, "payload_too_large", f"Body exceeds {max_size} bytes")
+                # The unread body is still on the socket; do not parse it as
+                # the next request.
+                self.close_connection = True
                 return None
-            return self.rfile.read(length)
+            try:
+                data = self.rfile.read(length)
+            except (socket.timeout, TimeoutError, ConnectionError):
+                self.close_connection = True
+                raise _ClientGone()
+            if len(data) != length:
+                self.close_connection = True
+                raise _ClientGone()
+            return data
 
         def _json_body(self) -> Optional[dict]:
-            raw = self._read_body()
+            raw = self._read_body(JSON_BODY_MAX_BYTES)
             if raw is None:
                 return None
             if not raw:
@@ -341,16 +394,11 @@ def make_handler(app: App):
             except ValueError as exc:
                 self._error(400, "bad_request", str(exc))
                 return
-            params = body.get("kdf_params") or default_kdf_params()
-            if not isinstance(params, dict):
-                self._error(400, "bad_request", "kdf_params must be an object")
-                return
             try:
-                iterations = int(params.get("iterations") or 0)
-            except (TypeError, ValueError):
-                iterations = 0
-            if iterations < 600_000:
-                self._error(400, "weak_kdf", "kdf iterations must be at least 600000")
+                params = canonical_kdf_params(body.get("kdf_params"))
+            except ValueError as exc:
+                code = "weak_kdf" if "at least" in str(exc) else "bad_request"
+                self._error(400, code, str(exc))
                 return
             if self.app.db.get_account_by_email(email) is not None:
                 self._error(409, "email_taken", "An account with that email already exists")
@@ -395,6 +443,16 @@ def make_handler(app: App):
                 return
             if self.app.db.limited(self._rate_key("login")):
                 self._error(429, "rate_limited", "Too many sign-in attempts. Try again in a minute.")
+                return
+            # Per-account ceiling as well, so many IPs cannot share one target.
+            # Keyed on the email whether or not the account exists, so the
+            # limiter itself does not reveal which emails are registered.
+            if self.app.db.limited(
+                "login-account:" + hash_email(email, self.app.db.pepper),
+                limit=LOGIN_ACCOUNT_LIMIT,
+                window=LOGIN_ACCOUNT_WINDOW,
+            ):
+                self._error(429, "rate_limited", "Too many sign-in attempts for this account. Try again in a few minutes.")
                 return
             try:
                 auth_key = decode_auth_key(str(body.get("auth_key")))
@@ -508,7 +566,7 @@ def make_handler(app: App):
             self._json(200, result)
 
         def _webhook(self) -> None:
-            raw = self._read_body()
+            raw = self._read_body(WEBHOOK_BODY_MAX_BYTES)
             if raw is None:
                 return
             if not self.app.cfg.stripe_webhook_secret:
@@ -532,6 +590,19 @@ def make_handler(app: App):
             confirm = str(body.get("confirm") or "")
             if confirm.upper() not in {"DELETE", "YES", "DELETE MY ACCOUNT"}:
                 self._error(400, "confirm_required", "Send confirm=DELETE to permanently delete this account")
+                return
+            # Deleting wipes every revision, so a session cookie alone is not
+            # enough: the caller must prove they still hold the master password.
+            if self.app.db.limited(self._rate_key("login")):
+                self._error(429, "rate_limited", "Too many attempts. Try again in a minute.")
+                return
+            try:
+                auth_key = decode_auth_key(str(body.get("auth_key") or ""))
+            except ValueError:
+                self._error(401, "reauth_required", "Re-enter your master password to delete this account")
+                return
+            if not verify_auth_key(account["auth_verifier"], auth_key):
+                self._error(401, "reauth_required", "Re-enter your master password to delete this account")
                 return
             account_id = account["id"]
             self.app.db.audit(account_id, "delete_account", self._client_ip())

@@ -139,14 +139,16 @@ class Vault:
         # the file was edited. Fernet/GCM authenticates the ciphertext but not
         # the surrounding JSON, so without this check an attacker with write
         # access could alter the version, KDF, or cipher fields undetected.
-        if "hmac" in payload:
-            if not verify_file_hmac(payload, key):
-                secure_wipe(bytearray(key))
-                raise VaultIntegrityError(
-                    f"Vault integrity check failed for {self.path}. The password is "
-                    "correct but the file has been modified outside pwmanager. "
-                    "Restore from a backup, or run `pwmanager verify` for detail."
-                )
+        # Every format pwmanager has ever written carries an HMAC, so a missing
+        # one is tampering too: skipping the check would let an attacker strip
+        # the MAC and then edit the header freely.
+        if not verify_file_hmac(payload, key):
+            raise VaultIntegrityError(
+                f"Vault integrity check failed for {self.path}. The password is "
+                "correct but the file has been modified outside pwmanager "
+                f"({'its HMAC is missing' if 'hmac' not in payload else 'its HMAC does not match'}). "
+                "Restore from a backup, or run `pwmanager verify` for detail."
+            )
 
         self._unpack_inner(json.loads(plaintext.decode("utf-8")))
         self.key = key
@@ -472,8 +474,8 @@ class Vault:
         key, _ = derive_key(password, salt, payload.get("kdf", "pbkdf2"))
         cipher = payload.get("cipher", CIPHER_FERNET)
         plaintext = decrypt_bytes(payload["vault"].encode("ascii"), key, cipher)
-        if "hmac" in payload and not verify_file_hmac(payload, key):
-            raise ValueError("Import file failed integrity check.")
+        if not verify_file_hmac(payload, key):
+            raise ValueError("Import file failed integrity check (HMAC missing or wrong).")
         raw = json.loads(plaintext.decode("utf-8"))
         if isinstance(raw, dict) and raw.get("_format") == INNER_FORMAT:
             incoming = raw.get("entries") or {}

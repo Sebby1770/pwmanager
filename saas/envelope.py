@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any, Dict, Mapping, Tuple
 
+from saas.config import KDF_ITERATIONS, KDF_ITERATIONS_MAX
+
 REQUIRED_KEYS = ("v", "nonce", "ct", "kdf")
 
 # Top-level keys that would indicate a client uploaded vault plaintext.
@@ -106,31 +108,37 @@ def parse_envelope(payload: Any) -> Dict[str, Any]:
     kdf = payload["kdf"]
     if not isinstance(kdf, Mapping):
         raise EnvelopeError("kdf must be an object")
-    alg = str(kdf.get("alg") or kdf.get("name") or "")
-    if "PBKDF2" not in alg.upper() and alg.upper() != "PBKDF2-HMAC-SHA256":
+    alg = str(kdf.get("alg") or kdf.get("name") or "").upper()
+    if alg not in {"PBKDF2", "PBKDF2-HMAC-SHA256"}:
         raise EnvelopeError("kdf.alg must be PBKDF2-HMAC-SHA256")
+    raw_iterations = kdf.get("iterations")
+    if isinstance(raw_iterations, bool):
+        raise EnvelopeError("kdf.iterations must be an integer")
     try:
-        iterations = int(kdf.get("iterations"))
+        iterations = int(raw_iterations)
     except (TypeError, ValueError) as exc:
         raise EnvelopeError("kdf.iterations must be an integer") from exc
-    if iterations < 600_000:
-        raise EnvelopeError("kdf.iterations must be at least 600000")
+    if iterations < KDF_ITERATIONS:
+        raise EnvelopeError(f"kdf.iterations must be at least {KDF_ITERATIONS}")
+    if iterations > KDF_ITERATIONS_MAX:
+        raise EnvelopeError(f"kdf.iterations must be at most {KDF_ITERATIONS_MAX}")
     salt = kdf.get("salt")
     if not isinstance(salt, str):
         raise EnvelopeError("kdf.salt must be a base64 string")
     _b64decode("kdf.salt", salt, expected_len=32)
 
+    # Canonical metadata only: nothing free-form from the client is stored.
     normalised: Dict[str, Any] = {
         "v": version_i,
         "nonce": payload["nonce"].strip(),
         "ct": payload["ct"].strip(),
         "kdf": {
             "alg": "PBKDF2-HMAC-SHA256",
-            "hash": str(kdf.get("hash") or "SHA-256"),
+            "hash": "SHA-256",
             "iterations": iterations,
-            "dk_len": int(kdf.get("dk_len") or kdf.get("dkLen") or 64),
+            "dk_len": 64,
             "salt": salt.strip(),
-            "email_mix": str(kdf.get("email_mix") or "sha256(salt||email)"),
+            "email_mix": "sha256(salt||email)",
         },
     }
     if "updated_at" in payload:

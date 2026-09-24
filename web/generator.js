@@ -304,7 +304,9 @@
     }
     if (opts.addSymbol) {
       var symbolAt = randomInt(picked.length);
-      picked[symbolAt] += choice(SYMBOLS);
+      // Never the separator itself: "word--word" reads as an empty word, not
+      // as an extra symbol, and the promised symbol would silently vanish.
+      picked[symbolAt] += choice(stripChars(SYMBOLS, opts.separator));
     }
     return picked.join(opts.separator);
   }

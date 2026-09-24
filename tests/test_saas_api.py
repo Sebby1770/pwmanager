@@ -271,6 +271,7 @@ def test_webhook_accepts_valid_hmac_and_is_idempotent(api):
             "data": {
                 "object": {
                     "object": "checkout.session",
+                    "payment_status": "paid",
                     "customer": "cus_test_123",
                     "client_reference_id": account_id,
                     "metadata": {"account_id": account_id},
@@ -317,14 +318,14 @@ def test_webhook_without_secret_is_503(api):
 
 
 def test_account_delete_wipes_blobs_and_tombstones_email(api):
-    status, created, *_ = register(api, email="gone@example.com")
+    status, created, auth, _salt = register(api, email="gone@example.com")
     account_id = created["account"]["id"]
     api.db.execute(
         "UPDATE accounts SET plan = 'pro', plan_status = 'active' WHERE id = ?",
         (account_id,),
     )
     assert api.request("PUT", "/api/vault", _envelope())[0] == 200
-    status, body = api.request("POST", "/api/account/delete", {"confirm": "DELETE"})
+    status, body = api.request("POST", "/api/account/delete", {"confirm": "DELETE", "auth_key": auth})
     assert status == 200, body
     assert api.db.get_vault(account_id) is None
     assert api.db.get_account_by_email("gone@example.com") is None

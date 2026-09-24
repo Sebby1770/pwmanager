@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased (3.3.0)
+
+### Security
+- Security audit fixes F1–F12; see the table in `SECURITY.md`.
+- Stripe: Pro is granted only once payment has actually succeeded, and stale or out-of-order webhook events can no longer change the plan.
+- API: rate limiting uses the proxy-appended `X-Forwarded-For` hop, logins are also throttled per account, JSON routes cap bodies at 16 KiB, state-changing routes reject cross-origin and non-JSON requests, and sockets time out after 30 s.
+- Account deletion now requires the auth key (re-entering the master password), not just a session cookie.
+- `kdf_params` are validated and stored in canonical form.
+- CLI: a vault or encrypted export with its HMAC removed is refused.
+- Web vault: locking clears the clipboard and wipes decrypted values from the DOM; cloud sync compares a timestamp sealed inside the ciphertext, which fixes a data-loss bug where a second device overwrote newer cloud data.
+
+### Fixed
+- The passphrase generator's extra symbol is never the separator.
+
+### Tests
+- Regression tests for every audit finding, including Playwright tests against the real server and a zero-knowledge wire test.
+
 ## 3.2.0
 
 ### Added
