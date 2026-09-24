@@ -1755,10 +1755,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     ic = sub.add_parser("import-csv", help="Import entries from CSV")
-    ic.add_argument("file", help="Path to CSV file")
+    ic.add_argument("file", help="Path to a CSV export, or an unencrypted Bitwarden JSON export")
     ic.add_argument(
         "--format",
-        choices=["auto", "bitwarden", "chrome", "generic"],
+        choices=["auto", "bitwarden", "bitwarden-json", "chrome", "generic"],
         default="auto",
         dest="csv_format",
         help="CSV format (default: auto-detect)",

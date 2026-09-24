@@ -177,6 +177,23 @@ def make_handler(app: App):
                 payload.update(extra)
             self._json(status, payload)
 
+        def handle_one_request(self) -> None:
+            self._body_read = False
+            super().handle_one_request()
+            if getattr(self, "command", None) and not self._body_read and self._has_body():
+                # A handler answered without consuming the body (401, 404,
+                # 429, 503, …). Left on a keep-alive socket, those bytes would
+                # be parsed as the *next* request, which is request smuggling
+                # behind any proxy that reuses upstream connections. Close.
+                self.close_connection = True
+
+        def _has_body(self) -> bool:
+            if self.headers is None:
+                return False
+            if self.headers.get("Transfer-Encoding"):
+                return True  # chunked bodies are never read by this server
+            return (self.headers.get("Content-Length") or "0").strip() not in {"", "0"}
+
         def do_OPTIONS(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if not path.startswith("/api/"):
@@ -244,7 +261,7 @@ def make_handler(app: App):
                 self._error(403, "origin_forbidden", "Cross-origin requests are not allowed")
                 self.close_connection = True
                 return False
-            has_body = (self.headers.get("Content-Length") or "0").strip() not in {"", "0"}
+            has_body = self._has_body()
             ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             if has_body and ctype != "application/json":
                 self._error(415, "unsupported_media_type", "Request body must be application/json")
@@ -265,6 +282,7 @@ def make_handler(app: App):
                 # the next request.
                 self.close_connection = True
                 return None
+            self._body_read = True
             try:
                 data = self.rfile.read(length)
             except (socket.timeout, TimeoutError, ConnectionError):

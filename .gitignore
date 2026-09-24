@@ -45,3 +45,4 @@ htmlcov/
 # Junk / duplicate docs
 README copy*
 README_*.md
+coverage.xml

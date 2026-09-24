@@ -28,8 +28,22 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run tests
-        run: python -m pytest tests/ -q
+      - name: Run tests (with coverage)
+        run: python -m pytest tests/ -q --cov --cov-report=xml --cov-report=
+
+      - name: Coverage gate (security-critical modules >= 90%)
+        run: |
+          python -m coverage report --fail-under=90 \
+            --include="pwmanager/crypto.py,pwmanager/vault.py,pwmanager/importers.py,saas/*"
+          echo "--- whole package (informational) ---"
+          python -m coverage report | tail -1
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
 
       - name: Set up Node
         uses: actions/setup-node@v4

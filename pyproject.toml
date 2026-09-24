@@ -55,3 +55,10 @@ pwmanager = ["data/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["pwmanager", "saas"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
