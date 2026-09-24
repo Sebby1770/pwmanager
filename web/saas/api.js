@@ -106,3 +106,38 @@ export async function deleteAccount(authKeyB64) {
 export async function exportAccount() {
   return request("GET", "/api/account/export");
 }
+
+/* ---- passkeys (second factor for cloud sign-in) ---- */
+
+export async function loginWebauthn(ceremony, credential) {
+  return request("POST", "/api/login/webauthn", { ceremony: ceremony, credential: credential });
+}
+
+export async function loginRecovery(ceremony, code) {
+  return request("POST", "/api/login/recovery", { ceremony: ceremony, code: code });
+}
+
+export async function passkeyOptions() {
+  return request("POST", "/api/webauthn/register/options", {});
+}
+
+export async function passkeyRegister(ceremony, credential, name, authKeyB64) {
+  return request("POST", "/api/webauthn/register/verify", {
+    ceremony: ceremony,
+    credential: credential,
+    name: name,
+    auth_key: authKeyB64
+  });
+}
+
+export async function passkeys() {
+  return request("GET", "/api/webauthn/credentials");
+}
+
+export async function deletePasskey(id, authKeyB64) {
+  return request("POST", "/api/webauthn/credentials/delete", { id: id, auth_key: authKeyB64 });
+}
+
+export async function regenerateRecoveryCodes(authKeyB64) {
+  return request("POST", "/api/webauthn/recovery-codes", { auth_key: authKeyB64 });
+}

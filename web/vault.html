@@ -219,6 +219,20 @@
     <button type="button" class="btn btn-brass" id="btn-checkout-month">Pro monthly (A$4)</button>
     <button type="button" class="btn btn-ghost" id="btn-checkout-year">Pro yearly (A$40)</button>
   </div>
+  <section id="passkey-section" class="passkey-section" hidden aria-labelledby="passkey-heading">
+    <h3 id="passkey-heading">Passkeys (two-step cloud sign-in)</h3>
+    <p class="fine">With a passkey, the master password alone can no longer sign in to the cloud copy. Unlocking this device's vault still needs only the master password.</p>
+    <ul id="passkey-list" class="passkey-list"></ul>
+    <div class="form-actions">
+      <button type="button" class="btn btn-ghost" id="btn-passkey-add">Add passkey</button>
+      <button type="button" class="btn btn-ghost" id="btn-recovery-regen" hidden>New recovery codes</button>
+    </div>
+    <div id="recovery-box" class="warning-callout" hidden>
+      <p>Recovery codes — each works once if you lose every passkey. Store them offline; they are shown only now.</p>
+      <pre id="recovery-codes" class="recovery-codes"></pre>
+    </div>
+    <p id="passkey-status" class="status" role="status"></p>
+  </section>
   <div class="form-actions">
     <button type="button" class="btn btn-ghost" id="btn-logout">Sign out of cloud</button>
     <button type="button" class="btn btn-danger" id="btn-delete-account">Delete cloud account</button>

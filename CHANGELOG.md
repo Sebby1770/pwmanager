@@ -15,6 +15,7 @@
 - CLI: a tampered, non-ASCII vault MAC reports an integrity failure instead of crashing (F14).
 
 ### Added
+- **Passkeys (WebAuthn) as a second factor for cloud sign-in.** Register passkeys from the vault's Account dialog; later sign-ins need the passkey or a one-time recovery code (10 are issued with the first passkey). The local vault still unlocks with the master password alone. Server: `saas/mfa.py` (install `pwmanager[saas]`).
 - `import-csv` also accepts unencrypted Bitwarden JSON exports (`--format bitwarden-json`, or auto-detected), plus 1Password CSV columns.
 
 ### Fixed

@@ -34,6 +34,10 @@ full = [
     "argon2-cffi>=23.1.0",
     "pyperclip>=1.8.2",
 ]
+saas = [
+    "argon2-cffi>=23.1.0",
+    "webauthn>=2.0",
+]
 test = [
     "pytest>=7",
 ]
