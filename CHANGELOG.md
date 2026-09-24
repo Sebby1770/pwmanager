@@ -11,11 +11,21 @@
 - CLI: a vault or encrypted export with its HMAC removed is refused.
 - Web vault: locking clears the clipboard and wipes decrypted values from the DOM; cloud sync compares a timestamp sealed inside the ciphertext, which fixes a data-loss bug where a second device overwrote newer cloud data.
 
+- API: a request whose body was not read now closes the connection, which blocks HTTP request smuggling on keep-alive connections (F13).
+- CLI: a tampered, non-ASCII vault MAC reports an integrity failure instead of crashing (F14).
+
+### Added
+- `import-csv` also accepts unencrypted Bitwarden JSON exports (`--format bitwarden-json`, or auto-detected), plus 1Password CSV columns.
+
 ### Fixed
 - The passphrase generator's extra symbol is never the separator.
+- CSV import keeps passwords and notes verbatim, reads back the `totp_secret` column from pwmanager's own export, keeps `favorite`/`kind`/`tags`, and never produces two entries with the same name (F15).
 
 ### Tests
 - Regression tests for every audit finding, including Playwright tests against the real server and a zero-knowledge wire test.
+- Property-based tests (hypothesis): AEAD round-trips, tampering with any byte or field of the vault file and the SaaS envelope (including real JS-produced envelopes decrypted in Python), envelope parser fuzzing, and CSV/Bitwarden-JSON importer fuzzing with an export→import round trip.
+- Playwright end-to-end flow: sign up, add, lock, unlock, sync, second device, offline, CSP.
+- CI enforces at least 90% coverage on `crypto.py`, `vault.py`, `importers.py` and `saas/` (currently 98%).
 
 ## 3.2.0
 

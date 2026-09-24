@@ -64,7 +64,7 @@ such as Bitwarden, 1Password, or KeePassXC.
 An adversarial review of `pwmanager/crypto.py`, `pwmanager/vault.py`, `saas/`
 and `web/saas/`. Every finding below has a regression test that failed before
 the fix (`tests/test_security_audit.py`, `tests/test_web_security_e2e.py`,
-`tests/js/saas_vault.mjs`).
+`tests/test_property_*.py`, `tests/js/saas_vault.mjs`).
 
 | Id | Severity | Area | Finding | Fix |
 |----|----------|------|---------|-----|
@@ -80,6 +80,9 @@ the fix (`tests/test_security_audit.py`, `tests/test_web_security_e2e.py`,
 | F10 | Low | `saas/server.py`, `web/saas/api.js` | No server-side CSRF defence beyond `SameSite=Strict` (which does not cover same-site origins), and a session cookie alone could delete the account and every revision. | Reject cross-origin `Origin` and non-JSON bodies on state-changing routes; account deletion re-verifies `authKey`. |
 | F11 | Low | `saas/server.py` | No socket timeout: a client that sent headers and then stalled pinned a thread forever. | Per-request socket timeout (`request_timeout`, 30 s). |
 | F12 | Info | `web/generator.js` | The "add a symbol" passphrase option could pick the separator (`-`), so the promised symbol disappeared (also caused a ~7% flaky JS test). | The separator is excluded from the extra-symbol pool. |
+| F13 | Medium | `saas/server.py` | Handlers that answered early (401/404/429/503) left the request body unread on a keep-alive socket, where it was parsed as the next request: one request in, two responses out. Behind a proxy that reuses upstream connections this is request smuggling. Found by the Phase 2 end-to-end test. | Any request whose body was not consumed (or uses `Transfer-Encoding`) closes the connection. |
+| F14 | Low | `pwmanager/crypto.py` | A non-ASCII character in the vault's `hmac` field made `hmac.compare_digest` raise `TypeError`, so the CLI crashed instead of reporting tampering. Found by hypothesis. | Compare UTF-8 bytes; malformed MACs are an integrity failure. |
+| F15 | Medium (data) | `pwmanager/importers.py` | CSV import stripped leading/trailing whitespace from passwords and notes, never read the `totp_secret` column that pwmanager's own export writes (TOTP secrets lost on export→import), and could emit duplicate names ("a", "a", "a (2)") so a merge silently dropped entries. Found by hypothesis. | Passwords and notes kept verbatim, `totp_secret` read, names made unique against every name already used. |
 
 ### Checked and found sound
 

@@ -294,3 +294,33 @@ def test_f8_import_without_hmac_is_rejected(tmp_path):
     dest.create("another master password", kdf="pbkdf2")
     with pytest.raises(ValueError):
         dest.import_encrypted(out, "export password value")
+
+
+# ------------------------------------------------------------ F13 request smuggling
+
+
+@pytest.mark.parametrize("path", ["/api/checkout", "/api/vault/revisions", "/api/account/delete", "/api/nope"])
+def test_f13_unread_body_is_never_parsed_as_a_second_request(make_api, path):
+    """An early 401/404/503 used to leave the body on a keep-alive socket, where
+    it was read as the next request: one request in, two responses out."""
+    api = make_api()
+    smuggled = b"GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n"
+    sock = socket.create_connection(("127.0.0.1", api.port), timeout=5)
+    try:
+        sock.sendall(
+            b"POST " + path.encode() + b" HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            b"Content-Length: " + str(len(smuggled)).encode() + b"\r\n\r\n" + smuggled
+        )
+        data = b""
+        try:
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        except socket.timeout:
+            pass
+    finally:
+        sock.close()
+    assert data.count(b"HTTP/1.1 ") == 1, data.decode(errors="replace")
+    assert b'"service":"pwmanager"' not in data

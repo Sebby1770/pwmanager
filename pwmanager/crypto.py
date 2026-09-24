@@ -162,8 +162,15 @@ def verify_file_hmac(payload: dict, key: bytes) -> bool:
     stored = payload.get("hmac")
     if not isinstance(stored, str):
         return False
-    # All comparisons always run so the result does not leak which form matched.
-    current = hmac.compare_digest(file_hmac(payload, key), stored)
-    v2 = hmac.compare_digest(file_hmac_v2(payload, key), stored)
-    legacy = hmac.compare_digest(legacy_file_hmac(payload, key), stored)
+    # compare_digest refuses non-ASCII str, so a tampered MAC like "é…" used
+    # to crash unlock with TypeError instead of reporting tampering. Compare
+    # bytes instead. All three forms always run so timing does not reveal
+    # which one matched.
+    stored_b = stored.encode("utf-8", "surrogatepass")
+    try:
+        current = hmac.compare_digest(file_hmac(payload, key).encode(), stored_b)
+        v2 = hmac.compare_digest(file_hmac_v2(payload, key).encode(), stored_b)
+        legacy = hmac.compare_digest(legacy_file_hmac(payload, key).encode(), stored_b)
+    except (KeyError, TypeError):
+        return False
     return current or v2 or legacy

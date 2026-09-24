@@ -9,7 +9,8 @@ import {
   parseEnvelope,
   randomBytes,
   SALT_BYTES,
-  bytesToB64
+  bytesToB64,
+  b64ToBytes
 } from "../../web/saas/crypto.js";
 
 const email = "roundtrip@example.com";
@@ -42,4 +43,23 @@ if (!failed) {
 if (bytesToB64(salt) !== keys.saltB64) {
   throw new Error("salt encoding drifted");
 }
-console.log("saas crypto roundtrip ok");
+// Exhaustive single-byte tamper: every byte of nonce and ciphertext is covered
+// by the GCM tag, so flipping any one of them must fail to decrypt.
+for (const field of ["nonce", "ct"]) {
+  const raw = b64ToBytes(envelope[field]);
+  for (let i = 0; i < raw.length; i += 1) {
+    const copy = raw.slice();
+    copy[i] ^= 0x01 << (i % 8);
+    let opened = false;
+    try {
+      await decryptVault(keys.vaultKey, Object.assign({}, envelope, { [field]: bytesToB64(copy) }));
+      opened = true;
+    } catch (err) {
+      /* expected */
+    }
+    if (opened) {
+      throw new Error(`tampered ${field}[${i}] still decrypted`);
+    }
+  }
+}
+console.log("saas crypto roundtrip ok (tamper-any-byte checked)");
