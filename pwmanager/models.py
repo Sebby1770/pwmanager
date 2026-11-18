@@ -28,6 +28,8 @@ class Entry:
     # None = use global default (ROTATE_DEFAULT_DAYS) for rotation audit
     rotate_after_days: Optional[int] = None
     last_accessed: float = 0.0  # 0 = never accessed via view/get/copy
+    # Stable id shared with the cloud vault once synced ("" = never synced).
+    cloud_id: str = ""
 
     def is_note(self) -> bool:
         return self.kind == KIND_NOTE
@@ -60,4 +62,5 @@ class Entry:
             kind=kind,
             rotate_after_days=rotate,
             last_accessed=float(d.get("last_accessed", 0) or 0),
+            cloud_id=str(d.get("cloud_id", "") or ""),
         )

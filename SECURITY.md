@@ -133,6 +133,28 @@ the fix (`tests/test_security_audit.py`, `tests/test_web_security_e2e.py`,
 
 Tests: `tests/test_kdf_v2.py` (JS↔Python agreement for both schemes, bounds, vendor pin), `tests/js/saas_kdf.mjs`, `tests/test_rekey.py`, `tests/test_sessions.py`, `tests/test_web_rekey_e2e.py` (migration, cross-device password change, downgrade refusal, device sign-out). The zero-knowledge wire test now also covers a password change.
 
+## CLI cloud link (3.4)
+
+`pwmanager cloud` stores, per local vault, a link file under
+`~/.config/pwmanager/cloud/` (directory 0700, file 0600):
+
+| Stored | Not stored |
+|--------|-----------|
+| Server URL, email, account id | Cloud master password |
+| Session token (bearer, 14 days, revocable from any device's device list) | `vaultKey`, `authKey`, the Argon2 output |
+| Strongest KDF used so far (downgrade floor) | Any entry data |
+| `HMAC-SHA256(authKey, "pwmanager-cli key check v1")` | |
+| Last-sync base: entry cloud ids and `updated_at` | |
+
+Someone who steals the file can use the token until it expires or is revoked:
+download ciphertext, or (on Pro) upload a replacement, which revisions let you
+undo. They cannot delete the account (that needs `authKey`) or read anything. The key-check
+value allows offline password guessing at full Argon2id cost per guess,
+which is the same as holding the ciphertext the token already exposes. `http://`
+is refused except to loopback, so the token never crosses a network unencrypted.
+Passkeys cannot be used from a terminal; accounts with them sign in with a
+one-time recovery code.
+
 ## What it is / isn't for
 
 | Good fit | Poor fit |

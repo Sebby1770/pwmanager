@@ -34,7 +34,7 @@ jobs:
       - name: Coverage gate (security-critical modules >= 90%)
         run: |
           python -m coverage report --fail-under=90 \
-            --include="pwmanager/crypto.py,pwmanager/vault.py,pwmanager/importers.py,pwmanager/cloudkdf.py,saas/*"
+            --include="pwmanager/crypto.py,pwmanager/vault.py,pwmanager/importers.py,pwmanager/cloudkdf.py,pwmanager/cloud.py,saas/*"
           echo "--- whole package (informational) ---"
           python -m coverage report | tail -1
 

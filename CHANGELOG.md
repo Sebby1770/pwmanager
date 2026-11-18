@@ -9,6 +9,8 @@
 - Changing the master password, or upgrading the KDF, deletes cloud revisions sealed with the old key and signs out every other device.
 
 ### Added
+- **CLI cloud sync**: `pwmanager cloud login | sync | pull | status | logout` links a local CLI vault to a cloud account. The merge is three-way against the last sync, so edits on either side merge, deletions propagate instead of coming back, and a conflict keeps the newer version with the older password saved in history. Same zero-knowledge protocol and KDF rules as the browser; nothing that decrypts the vault is stored.
+- `GET /api/vault` returns an `ETag`; `PUT /api/vault` honours `If-Match` / `If-None-Match: *` and answers 409 on a concurrent change. The CLI uses this; the web client is unchanged.
 - **Change master password** in the web vault (Account → Change master password), for local-only vaults and cloud accounts. The server swaps the verifier, salt, KDF settings and vault in a single transaction (`POST /api/account/rekey`).
 - **Signed-in devices**: see each session by browser and system, when it was last used, and sign out one device or every other device (`GET /api/sessions`, `POST /api/sessions/revoke`, `POST /api/sessions/revoke-others`).
 - **Recent security events**: sign-ins, passkey and password changes and device sign-outs, listed in the Account dialog (`GET /api/account/events`).
