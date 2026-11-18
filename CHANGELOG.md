@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased (3.4.0)
+
+### Security
+- **Web vault key derivation is now Argon2id** (64 MiB, 3 passes, 4 lanes) instead of PBKDF2-SHA256. One Argon2id derivation is split into the vault key and the auth key with HKDF-SHA256, so an attacker holding the auth key gets no shortcut to the vault key and pays the full memory-hard cost per guess. The Argon2 build is vendored from npm `hash-wasm` 4.13.0, pinned by hash and loaded with Subresource Integrity; nothing comes from a CDN.
+- Existing (PBKDF2) vaults keep opening and are **migrated on the next unlock**, locally and on the cloud account in one atomic step.
+- The browser enforces minimum and maximum KDF settings itself. A server offering a weaker scheme than the device already uses is refused, and nothing derived under it is sent.
+- Changing the master password, or upgrading the KDF, deletes cloud revisions sealed with the old key and signs out every other device.
+
+### Added
+- **Change master password** in the web vault (Account → Change master password), for local-only vaults and cloud accounts. The server swaps the verifier, salt, KDF settings and vault in a single transaction (`POST /api/account/rekey`).
+- **Signed-in devices**: see each session by browser and system, when it was last used, and sign out one device or every other device (`GET /api/sessions`, `POST /api/sessions/revoke`, `POST /api/sessions/revoke-others`).
+- **Recent security events**: sign-ins, passkey and password changes and device sign-outs, listed in the Account dialog (`GET /api/account/events`).
+- A device whose cloud account was re-keyed elsewhere adopts the new key once sign-in proves it, and loads the cloud copy if its local copy is sealed with the old password.
+
+### Fixed
+- Closed dialogs were marked `hidden`, which `showModal()` never clears, so pressing Escape once stopped the help dialog (and others) from opening again.
+- Locking now also closes the account and password dialogs and clears the device and event lists.
+
+
 ## Unreleased (3.3.0)
 
 ### Security
@@ -10,7 +29,6 @@
 - `kdf_params` are validated and stored in canonical form.
 - CLI: a vault or encrypted export with its HMAC removed is refused.
 - Web vault: locking clears the clipboard and wipes decrypted values from the DOM; cloud sync compares a timestamp sealed inside the ciphertext, which fixes a data-loss bug where a second device overwrote newer cloud data.
-
 - API: a request whose body was not read now closes the connection, which blocks HTTP request smuggling on keep-alive connections (F13).
 - CLI: a tampered, non-ASCII vault MAC reports an integrity failure instead of crashing (F14).
 

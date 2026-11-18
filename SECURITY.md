@@ -40,9 +40,14 @@ re-verify `authKey`. Recovery codes are 80-bit and stored as peppered HMACs.
 The operator **cannot** reset a forgotten master password. Card numbers are
 accepted only by Stripe Checkout, never by this process.
 
-Browser KDF: PBKDF2-HMAC-SHA256, 600,000 iterations, SHA-256, 32-byte salt
-mixed as `SHA-256(salt || email)`. AES-GCM-256 with a 12-byte nonce and AAD
-`pwmanager-vault-v1`. Session tokens are hashed at rest; IPs in audit logs are
+Browser KDF (v2, 3.4+): `masterKey = Argon2id(password, SHA-256(salt || email))`
+with m = 64 MiB, t = 3, p = 4 and a 32-byte random salt; then
+`vaultKey = HKDF-SHA256(masterKey, info "pwmanager/v2/vault-key")` and
+`authKey = HKDF-SHA256(masterKey, info "pwmanager/v2/auth-key")`. The browser
+refuses parameters below those floors (or above m = 256 MiB, t = 20) whatever
+the server says. Legacy v1 (PBKDF2-HMAC-SHA256, 600,000 iterations, 64 bytes
+split in two) still opens and is migrated to v2 on the next unlock.
+AES-GCM-256 with a 12-byte nonce and AAD `pwmanager-vault-v1`. Session tokens are hashed at rest; IPs in audit logs are
 HMAC-hashed. Production must terminate TLS in front of `saas/server.py`.
 
 The CLI threat model below still applies to `vault.json` files.
@@ -108,11 +113,25 @@ the fix (`tests/test_security_audit.py`, `tests/test_web_security_e2e.py`,
 - **XSS**: the vault renders every decrypted field with `textContent` or `.value`; there is no `innerHTML`, `eval`, or dynamic `href` from vault data. CSP is `script-src 'self'` in both headers and meta tags (the e2e tests have to bypass it to evaluate their own predicates).
 - **localStorage**: holds only the theme preference and the generator's non-secret settings; vault ciphertext lives in IndexedDB.
 
-### Known limitations (unchanged)
+### Known limitations
 
 - The web AAD is a constant: envelopes are not bound to an account id. Swapping blobs between accounts fails anyway, because each account has a different key.
 - A malicious server can still withhold updates or serve an older blob to a *new* device that has no local copy to compare against.
-- PBKDF2 with a 64-byte output runs the 600k iterations twice (once per 32-byte block). An attacker holding `authKey` needs only one block per guess, so the defender pays 2× for no extra security. Moving to Argon2id (via WASM) or HKDF-splitting one 32-byte output would fix this, but it changes the format.
+- ~~PBKDF2 with a 64-byte output ran the 600k iterations twice, so the defender paid 2× for no extra security.~~ Fixed in 3.4 by Argon2id + HKDF (one derivation, two keys).
+- Downgrade protection is per device: a device that has used Argon2id refuses a server that offers PBKDF2. A brand-new device has nothing to compare against, so a malicious server could still serve it the legacy scheme (still 600k PBKDF2) until the account has been migrated.
+- Until an account migrates, prelogin returns PBKDF2 settings for it but Argon2id defaults for unknown emails, which distinguishes not-yet-migrated accounts from nonexistent ones. The gap closes as accounts migrate on their next unlock.
+
+## 3.4 key derivation and account security
+
+| Change | Why |
+|--------|-----|
+| Argon2id + HKDF key split for the web vault | Memory-hard against GPU guessing of a stolen auth-key hash or ciphertext; one derivation instead of PBKDF2's two blocks. |
+| Vendored, pinned Argon2 WASM (`web/vendor/`) with SRI | No CDN in the trust path; `tests/test_kdf_v2.py` fails if the file changes. CSP gains `'wasm-unsafe-eval'` on `vault.html` only, which permits WebAssembly compilation but not `eval()` or inline script. |
+| Client-side KDF floors and ceilings, per-device downgrade guard | The server is untrusted: it cannot weaken derivation or stall the browser. |
+| `POST /api/account/rekey` (one transaction) | Password changes and KDF migrations never leave the account half-switched. Old-key revisions are deleted, because after a leak the old password must not open anything. All other sessions are revoked. |
+| Session list and revocation, security events | Users can see and end sessions they don't recognise. Labels are coarse ("Firefox on Linux"); raw User-Agents and IPs are not stored or shown. |
+
+Tests: `tests/test_kdf_v2.py` (JS↔Python agreement for both schemes, bounds, vendor pin), `tests/js/saas_kdf.mjs`, `tests/test_rekey.py`, `tests/test_sessions.py`, `tests/test_web_rekey_e2e.py` (migration, cross-device password change, downgrade refusal, device sign-out). The zero-knowledge wire test now also covers a password change.
 
 ## What it is / isn't for
 

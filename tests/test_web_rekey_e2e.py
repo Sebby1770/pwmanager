@@ -194,3 +194,35 @@ def test_local_only_password_change(browser, make_api):
         assert v.entry_names() == ["note-1"]
     finally:
         ctx.close()
+
+
+def test_devices_list_and_sign_out_everywhere_else(browser, make_api):
+    api = make_api()
+    base = f"http://127.0.0.1:{api.port}"
+    email = "devices-ui@example.com"
+    a_ctx, b_ctx = _ctx(browser), _ctx(browser)
+    try:
+        a = VaultPage(a_ctx.new_page(), base).open()
+        a.create(email, cloud=True)
+        b = VaultPage(b_ctx.new_page(), base).open()
+        b.unlock(email)
+        assert b.page.text_content("#plan-badge") == "Free"
+
+        a.page.click("#btn-account")
+        a.page.wait_for_function("() => document.querySelectorAll('#device-list li').length === 2")
+        assert a.page.locator("#device-list .device-current").count() == 1
+        assert "Chrome" in a.page.text_content("#device-list")
+        a.page.on("dialog", lambda d: d.accept())
+        a.page.click("#btn-revoke-others")
+        a.page.wait_for_function("() => document.querySelectorAll('#device-list li').length === 1")
+        a.page.wait_for_function(
+            "() => document.getElementById('event-list').textContent.includes('Signed out everywhere else')"
+        )
+        b_cookie = [c for c in b_ctx.cookies() if c["name"] == "pwmanager_session"][0]["value"]
+        assert api.db.session_account(b_cookie) is None
+        a.page.click("#account-close")
+        a.lock()
+        assert a.page.text_content("#device-list") == "" and a.page.text_content("#event-list") == ""
+    finally:
+        a_ctx.close()
+        b_ctx.close()

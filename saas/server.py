@@ -424,6 +424,18 @@ def make_handler(app: App):
             if method == "POST" and path == "/api/account/rekey":
                 self._account_rekey()
                 return
+            if method == "GET" and path == "/api/sessions":
+                self._sessions_list()
+                return
+            if method == "POST" and path == "/api/sessions/revoke":
+                self._sessions_revoke()
+                return
+            if method == "POST" and path == "/api/sessions/revoke-others":
+                self._sessions_revoke_others()
+                return
+            if method == "GET" and path == "/api/account/events":
+                self._account_events()
+                return
             if method == "GET" and path == "/api/account/export":
                 self._account_export()
                 return
@@ -822,6 +834,58 @@ def make_handler(app: App):
                 {"account": self._public(fresh), "vault_replaced": blob is not None},
                 extra=[("Set-Cookie", self._cookie(token))],
             )
+
+        def _sessions_list(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            current = account["session_id"]
+            sessions = [
+                {
+                    "id": row["id"],
+                    "device": row["device_label"] or "Unknown browser",
+                    "created_at": row["created_at"],
+                    "last_used_at": row["last_used_at"],
+                    "expires_at": row["expires_at"],
+                    "current": row["id"] == current,
+                }
+                for row in self.app.db.list_sessions(account["id"])
+            ]
+            self._json(200, {"sessions": sessions})
+
+        def _sessions_revoke(self) -> None:
+            account, token = self._require_account()
+            if account is None:
+                return
+            body = self._json_body()
+            if body is None:
+                return
+            session_id = str(body.get("id") or "")
+            if not self.app.db.revoke_account_session(account["id"], session_id):
+                self._error(404, "not_found", "No such session on this account")
+                return
+            self.app.db.audit(account["id"], "session_revoked", self._client_ip())
+            extra = None
+            if session_id == account["session_id"]:
+                extra = [("Set-Cookie", self._cookie("", delete=True))]
+            self._json(200, {"ok": True, "current": session_id == account["session_id"]}, extra=extra)
+
+        def _sessions_revoke_others(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            if self._json_body() is None:
+                return
+            revoked = self.app.db.revoke_other_sessions(account["id"], account["session_id"])
+            self.app.db.audit(account["id"], "other_sessions_revoked", self._client_ip())
+            self._json(200, {"ok": True, "revoked": revoked})
+
+        def _account_events(self) -> None:
+            account, _token = self._require_account()
+            if account is None:
+                return
+            events = [{"event": row["event"], "at": row["at"]} for row in self.app.db.security_events(account["id"])]
+            self._json(200, {"events": events})
 
         def _account_delete(self) -> None:
             account, token = self._require_account()

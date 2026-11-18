@@ -225,3 +225,37 @@ def canonical_kdf_params(params) -> dict:
 
 def hash_email(email: str, pepper: bytes) -> str:
     return hmac.new(pepper, ("email|" + normalize_email(email)).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+_BROWSERS = (
+    ("pwmanager-cli", "pwmanager CLI"),
+    ("Edg/", "Edge"),
+    ("OPR/", "Opera"),
+    ("Firefox/", "Firefox"),
+    ("Chrome/", "Chrome"),
+    ("Safari/", "Safari"),
+    ("curl/", "curl"),
+    ("Python-urllib", "Python client"),
+)
+_SYSTEMS = (
+    ("iPhone", "iOS"),
+    ("iPad", "iPadOS"),
+    ("Android", "Android"),
+    ("CrOS", "ChromeOS"),
+    ("Windows", "Windows"),
+    ("Mac OS X", "macOS"),
+    ("Macintosh", "macOS"),
+    ("Linux", "Linux"),
+)
+
+
+def device_label(user_agent: str) -> str:
+    """A coarse, human-readable device name ("Firefox on Linux").
+
+    Deliberately low-resolution: enough to recognise your own devices in a
+    session list, not enough to fingerprint anyone. The raw string is never stored.
+    """
+    ua = user_agent or ""
+    browser = next((name for needle, name in _BROWSERS if needle in ua), "Unknown browser")
+    system = next((name for needle, name in _SYSTEMS if needle in ua), "")
+    return f"{browser} on {system}" if system else browser

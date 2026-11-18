@@ -112,6 +112,10 @@ function bind() {
     "help-dialog",
     "help-close",
     "btn-change-password",
+    "devices-section",
+    "device-list",
+    "btn-revoke-others",
+    "event-list",
     "password-dialog",
     "password-form",
     "pw-current",
@@ -186,11 +190,15 @@ function wipeDecryptedDom() {
   if (el["totp-display"]) el["totp-display"].textContent = "";
   hideRecoveryCodes();
   if (el["passkey-list"]) el["passkey-list"].textContent = "";
+  if (el["device-list"]) el["device-list"].textContent = "";
+  if (el["event-list"]) el["event-list"].textContent = "";
   if (el["totp-wrap"]) el["totp-wrap"].hidden = true;
   if (el["pane-detail"]) el["pane-detail"].hidden = true;
   if (el["pane-empty"]) el["pane-empty"].hidden = false;
   if (el["view-app"]) el["view-app"].dataset.ready = "false";
-  if (el["password-dialog"]) closeDialog(el["password-dialog"]);
+  ["password-dialog", "account-dialog"].forEach(function (id) {
+    if (el[id]) closeDialog(el[id]);
+  });
   if (el["sync-status"]) {
     el["sync-status"].textContent = "Local ciphertext only";
     el["sync-status"].dataset.kind = "";
@@ -504,6 +512,100 @@ function renderAccount() {
     (account.plan_status ? " (" + account.plan_status + ")" : "") +
     ". Cloud sync stores ciphertext only.";
   renderPasskeys();
+  renderDevices();
+}
+
+/* ---------------------------------------------------------------- devices */
+
+const EVENT_LABELS = {
+  register: "Account created",
+  login: "Signed in",
+  login_passkey: "Signed in with a passkey",
+  login_recovery_code: "Signed in with a recovery code",
+  login_mfa_challenge: "Password accepted, passkey step requested",
+  logout: "Signed out",
+  passkey_added: "Passkey added",
+  passkey_removed: "Passkey removed",
+  recovery_codes_regenerated: "New recovery codes created",
+  master_password_changed: "Master password changed",
+  kdf_upgraded: "Key derivation upgraded to Argon2id",
+  session_revoked: "A device was signed out",
+  other_sessions_revoked: "Signed out everywhere else",
+  export: "Account data exported",
+  delete_account: "Account deleted"
+};
+
+async function renderDevices() {
+  const section = el["devices-section"];
+  if (!section) return;
+  section.hidden = !state.account;
+  if (!state.account) return;
+  let listing;
+  let events;
+  try {
+    [listing, events] = await Promise.all([api.sessions(), api.securityEvents()]);
+  } catch (err) {
+    return;
+  }
+  const list = el["device-list"];
+  list.textContent = "";
+  listing.sessions.forEach(function (session) {
+    const li = document.createElement("li");
+    li.dataset.sessionId = session.id;
+    const label = document.createElement("span");
+    label.textContent =
+      session.device + " · last used " + ui.formatWhen(Date.parse(session.last_used_at || session.created_at));
+    li.appendChild(label);
+    if (session.current) {
+      const mark = document.createElement("span");
+      mark.className = "device-current";
+      mark.textContent = "This device";
+      li.appendChild(mark);
+    } else {
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "btn btn-ghost";
+      revoke.textContent = "Sign out";
+      revoke.addEventListener("click", async function () {
+        try {
+          await api.revokeSession(session.id);
+          ui.toast(session.device + " signed out.");
+        } catch (err) {
+          ui.toast(err.message || "Could not sign that device out.", "error");
+        }
+        renderDevices();
+      });
+      li.appendChild(revoke);
+    }
+    list.appendChild(li);
+  });
+  el["btn-revoke-others"].disabled = listing.sessions.length < 2;
+  const eventList = el["event-list"];
+  eventList.textContent = "";
+  events.events.slice(0, 15).forEach(function (event) {
+    const li = document.createElement("li");
+    const when = document.createElement("time");
+    when.dateTime = event.at;
+    when.textContent = ui.formatWhen(Date.parse(event.at));
+    const what = document.createElement("span");
+    what.textContent = EVENT_LABELS[event.event] || event.event;
+    li.appendChild(when);
+    li.appendChild(what);
+    eventList.appendChild(li);
+  });
+}
+
+async function revokeOthers() {
+  if (!window.confirm("Sign out every other device? They keep their encrypted local copy but must sign in again to sync.")) {
+    return;
+  }
+  try {
+    const result = await api.revokeOtherSessions();
+    ui.toast(result.revoked + " other device" + (result.revoked === 1 ? "" : "s") + " signed out.");
+  } catch (err) {
+    ui.toast(err.message || "Could not sign other devices out.", "error");
+  }
+  renderDevices();
 }
 
 /* ---------------------------------------------------------------- passkeys */
@@ -1177,6 +1279,7 @@ function wire() {
   });
   el["btn-account"].addEventListener("click", function () {
     openDialog(el["account-dialog"]);
+    renderDevices();
   });
   el["entry-form"].addEventListener("submit", saveEntry);
   el["entry-kind"].addEventListener("change", toggleKind);
@@ -1244,6 +1347,7 @@ function wire() {
   });
   el["btn-hibp"].addEventListener("click", hibpCheck);
   el["btn-passkey-add"].addEventListener("click", addPasskey);
+  el["btn-revoke-others"].addEventListener("click", revokeOthers);
   el["btn-change-password"].addEventListener("click", function () {
     closeDialog(el["account-dialog"]);
     setPasswordStatus("");

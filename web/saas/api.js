@@ -159,3 +159,21 @@ export async function rekey(currentAuthKeyB64, next, envelope, reason) {
     reason: reason
   });
 }
+
+/* ---- signed-in devices and security events ---- */
+
+export async function sessions() {
+  return request("GET", "/api/sessions");
+}
+
+export async function revokeSession(id) {
+  return request("POST", "/api/sessions/revoke", { id: id });
+}
+
+export async function revokeOtherSessions() {
+  return request("POST", "/api/sessions/revoke-others", {});
+}
+
+export async function securityEvents() {
+  return request("GET", "/api/account/events");
+}
