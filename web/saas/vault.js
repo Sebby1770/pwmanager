@@ -117,7 +117,7 @@ export async function idbGet(email) {
   });
 }
 
-export async function idbPut(email, envelope) {
+export async function idbPut(email, envelope, meta) {
   const key = String(email || "").trim().toLowerCase();
   if (!key) {
     throw new Error("email required");
@@ -128,9 +128,12 @@ export async function idbPut(email, envelope) {
   const db = await openDb();
   return new Promise(function (resolve, reject) {
     const tx = db.transaction(STORE, "readwrite");
+    // `cloud` records that this vault is linked to a cloud account, so unlock
+    // knows to follow (and never downgrade) the account's key derivation.
     tx.objectStore(STORE).put({
       email: key,
       envelope: envelope,
+      cloud: Boolean(meta && meta.cloud),
       saved_at: Date.now()
     });
     tx.oncomplete = function () {

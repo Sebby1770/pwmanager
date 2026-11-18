@@ -19,6 +19,9 @@ const state = {
   kdfParams: null,
   data: null,
   account: null,
+  // True once this vault is linked to a cloud account (persisted in IndexedDB),
+  // even while signed out: unlock then follows the account's key derivation.
+  cloudLinked: false,
   selectedId: null,
   dirty: false,
   idleTimer: null,
@@ -108,6 +111,14 @@ function bind() {
     "account-close",
     "help-dialog",
     "help-close",
+    "btn-change-password",
+    "password-dialog",
+    "password-form",
+    "pw-current",
+    "pw-new",
+    "pw-new2",
+    "pw-status",
+    "pw-cancel",
     "passkey-section",
     "passkey-list",
     "btn-passkey-add",
@@ -161,7 +172,7 @@ function wipeDecryptedDom() {
   // Hidden is not gone: every decrypted value written into the DOM stays
   // readable (devtools, extensions, a later XSS) until it is overwritten.
   if (el["entry-form"]) el["entry-form"].reset();
-  ["entry-id", "entry-name", "entry-username", "entry-password", "entry-url", "entry-notes", "entry-tags", "entry-totp", "search"].forEach(
+  ["entry-id", "entry-name", "entry-username", "entry-password", "entry-url", "entry-notes", "entry-tags", "entry-totp", "search", "pw-current", "pw-new", "pw-new2"].forEach(
     function (id) {
       if (el[id]) el[id].value = "";
     }
@@ -179,6 +190,11 @@ function wipeDecryptedDom() {
   if (el["pane-detail"]) el["pane-detail"].hidden = true;
   if (el["pane-empty"]) el["pane-empty"].hidden = false;
   if (el["view-app"]) el["view-app"].dataset.ready = "false";
+  if (el["password-dialog"]) closeDialog(el["password-dialog"]);
+  if (el["sync-status"]) {
+    el["sync-status"].textContent = "Local ciphertext only";
+    el["sync-status"].dataset.kind = "";
+  }
 }
 
 function lockVault(reason) {
@@ -234,8 +250,8 @@ async function persist() {
   if (!state.vaultKey || !state.data || !state.email) return;
   // Inside the ciphertext, so the server cannot forge or reorder it.
   state.data.saved_at = Date.now();
-  const envelope = await crypto.encryptVault(state.vaultKey, state.data, state.saltB64);
-  await vault.idbPut(state.email, envelope);
+  const envelope = await crypto.encryptVault(state.vaultKey, state.data, state.saltB64, state.kdfParams);
+  await vault.idbPut(state.email, envelope, { cloud: state.cloudLinked });
   state.dirty = false;
   if (state.account && state.account.pro) {
     try {
@@ -595,7 +611,7 @@ async function regenerateRecovery() {
  * Second sign-in step. Returns the account, or null to continue local-only.
  * Never blocks unlocking the local vault: that needs only the master password.
  */
-async function completeSecondFactor(challenge) {
+async function completeSecondFactor(challenge, email, authKeyB64) {
   try {
     if (!passkey.supported()) throw new Error("no passkeys in this browser");
     const assertion = await passkey.getPasskey(challenge.publicKey);
@@ -608,7 +624,7 @@ async function completeSecondFactor(challenge) {
     if (!code) return null;
     try {
       // The passkey attempt consumed the ceremony; ask for a fresh one.
-      const again = await api.login(state.email, state.authKeyB64);
+      const again = await api.login(email, authKeyB64);
       if (!again.mfa_required) return again.account;
       const session = await api.loginRecovery(again.ceremony, code);
       ui.toast("Signed in with a recovery code. " + session.account.recovery_codes_left + " left.", "warn");
@@ -657,7 +673,10 @@ async function afterUnlock() {
       }
     }
   }
-  // Lets tests (and anything else) know the initial cloud pull has settled.
+}
+
+/** Marks the unlock (cloud pull, key adoption, KDF upgrade) as fully settled. */
+function markReady() {
   el["view-app"].dataset.ready = "true";
 }
 
@@ -677,66 +696,262 @@ function typingTarget(target) {
 
 function openDialog(node) {
   if (!node) return;
-  if (typeof node.showModal === "function") node.showModal();
-  else node.hidden = false;
+  node.hidden = false;
+  if (typeof node.showModal === "function") {
+    if (!node.open) node.showModal();
+  }
 }
 
 function closeDialog(node) {
   if (!node) return;
-  if (typeof node.close === "function" && node.open) node.close();
-  else node.hidden = true;
+  // Native <dialog>: close it if open, and never set `hidden` (showModal does
+  // not clear it, so an Escape press used to break the dialog for good).
+  if (typeof node.close === "function") {
+    if (node.open) node.close();
+    return;
+  }
+  node.hidden = true;
 }
 
+function applyKeys(keys) {
+  state.vaultKey = keys.vaultKey;
+  state.authKeyB64 = crypto.bytesToB64(keys.authKeyBytes);
+  state.saltB64 = keys.saltB64;
+  state.kdfParams = keys.kdfParams;
+}
+
+/** Cloud sign-in with these keys, including the second factor. Null if refused or offline. */
+async function signIn(email, keys) {
+  const authKeyB64 = crypto.bytesToB64(keys.authKeyBytes);
+  try {
+    const session = await api.login(email, authKeyB64);
+    return session.mfa_required ? await completeSecondFactor(session, email, authKeyB64) : session.account;
+  } catch (err) {
+    return null;
+  }
+}
+
+function showNotice(message) {
+  if (!message) return;
+  el["sync-status"].textContent = message;
+  el["sync-status"].dataset.kind = "warn";
+  ui.toast(message, "warn");
+}
+
+/**
+ * Unlock. The local vault always opens with the master password alone; the
+ * cloud account is followed only on terms this device can verify:
+ *  - a server offering a weaker KDF than this device already uses is refused;
+ *  - an account re-keyed on another device is adopted once sign-in proves it;
+ *  - a legacy (PBKDF2) vault is migrated to Argon2id right after it opens.
+ */
 async function unlock(event) {
   event.preventDefault();
   const email = crypto.normalizeEmail(el["unlock-email"].value);
   const password = el["unlock-password"].value;
   setBusy(true);
   setLockStatus("Deriving keys… this can take a second on a slow device.");
+  let notice = "";
   try {
-    let record = await vault.idbGet(email);
-    let saltB64 = record && record.envelope && record.envelope.kdf ? record.envelope.kdf.salt : "";
-    if (!saltB64) {
+    const record = await vault.idbGet(email);
+    const local = record && record.envelope ? crypto.parseEnvelope(record.envelope) : null;
+    let pre = null;
+    try {
+      pre = await api.prelogin(email);
+      crypto.normalizeKdfParams(pre.kdf_params);
+    } catch (err) {
+      if (pre) notice = "The server offered key-derivation settings this app refuses. Cloud sign-in skipped.";
+      pre = null;
+    }
+    if (pre && local && record.cloud && crypto.kdfRank(pre.kdf_params) < crypto.kdfRank(local.kdfParams)) {
+      pre = null;
+      notice =
+        "The server asked for an older, weaker key derivation than this device already uses. Cloud sign-in skipped; your local vault is unaffected.";
+    }
+    if (!local && !pre) {
+      setLockStatus("No local vault for that email, and the API is unreachable.", "error");
+      return;
+    }
+
+    let keys = null;
+    let data = null;
+    if (local) {
+      const localKeys = await crypto.deriveKeys(password, email, local.kdf.salt, local.kdfParams);
       try {
-        const pre = await api.prelogin(email);
-        saltB64 = pre.kdf_salt;
-        state.kdfParams = pre.kdf_params;
+        data = await crypto.decryptVault(localKeys.vaultKey, record.envelope);
+        keys = localKeys;
       } catch (err) {
-        setLockStatus("No local vault for that email, and the API is unreachable.", "error");
-        return;
+        /* wrong password, or the password was changed on another device */
       }
     }
-    const keys = await crypto.deriveKeys(password, email, saltB64);
-    let data = vault.emptyVault();
-    if (record && record.envelope) {
-      try {
-        data = await crypto.decryptVault(keys.vaultKey, record.envelope);
-      } catch (err) {
+
+    let serverKeys = null;
+    if (pre) {
+      const matchesLocal = keys && pre.kdf_salt === keys.saltB64 && crypto.sameKdf(pre.kdf_params, keys.kdfParams);
+      if (matchesLocal || (keys && !record.cloud)) {
+        // Same key, or a local-only vault: one cheap attempt, no second derivation.
+        serverKeys = keys;
+      } else {
+        serverKeys = await crypto.deriveKeys(password, email, pre.kdf_salt, pre.kdf_params);
+      }
+    }
+    const account = serverKeys ? await signIn(email, serverKeys) : null;
+
+    let adopted = false;
+    if (!keys) {
+      if (local && !account) {
         setLockStatus("Could not decrypt the local vault. Check the master password.", "error");
         return;
       }
+      // No local vault: open an empty one, as before. A wrong password and a
+      // missing account must look the same here, or unlock would reveal which
+      // emails have accounts.
+      keys = serverKeys;
+      if (local) {
+        // The account moved to a new master password elsewhere; this device's
+        // copy is sealed with the old one. Only the cloud copy can replace it.
+        try {
+          const remote = await api.getVault();
+          data = await crypto.decryptVault(keys.vaultKey, remote.envelope);
+          adopted = true;
+          notice = "Your master password was changed on another device. This device now uses the new one.";
+        } catch (err) {
+          await api.logout();
+          setLockStatus(
+            "This device's vault is still sealed with your previous master password and there is no cloud copy to replace it. Unlock with the previous password, then change it here.",
+            "error"
+          );
+          return;
+        }
+      } else {
+        data = vault.emptyVault();
+      }
+    } else if (account && serverKeys !== keys) {
+      // Local opened with the old key, sign-in worked with the account's new
+      // key: adopt it so both stay in step (local data is re-sealed below).
+      keys = serverKeys;
+      adopted = true;
+      notice = "This account's master key changed on another device; this device now uses it too.";
+    } else if (!account && record && record.cloud && serverKeys && serverKeys !== keys) {
+      notice =
+        "Cloud sign-in failed: the master password may have been changed on another device. Your local vault is open.";
     }
+
     state.email = email;
-    state.vaultKey = keys.vaultKey;
-    state.authKeyB64 = crypto.bytesToB64(keys.authKeyBytes);
-    state.saltB64 = keys.saltB64;
-    state.kdfParams = keys.kdfParams;
+    applyKeys(keys);
     state.data = data;
-    state.account = null;
-    try {
-      const session = await api.login(email, state.authKeyB64);
-      state.account = session.mfa_required ? await completeSecondFactor(session) : session.account;
-    } catch (err) {
-      /* local-only is fine */
-    }
+    state.account = account;
+    state.cloudLinked = Boolean(account) || Boolean(record && record.cloud);
     el["unlock-password"].value = "";
     setLockStatus("");
     await afterUnlock();
+    if (adopted) await persist();
+    // Legacy vaults move to Argon2id now, while the password is at hand. A
+    // linked vault waits until it is signed in, so local and cloud never split.
+    if (crypto.kdfRank(state.kdfParams) < 2 && (state.account || !state.cloudLinked)) {
+      try {
+        await rekeyVault(password, "kdf_upgrade");
+        notice = notice || "Upgraded this vault's key derivation to Argon2id.";
+      } catch (err) {
+        notice = notice || "Could not upgrade the key derivation yet: " + (err.message || "error");
+      }
+    }
+    showNotice(notice);
+    markReady();
   } catch (err) {
     setLockStatus(err.message || "Unlock failed.", "error");
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * Re-seal the vault under a key from `newPassword` (fresh salt, current KDF
+ * defaults). The cloud account changes first and atomically; if that fails,
+ * nothing changes anywhere.
+ */
+async function rekeyVault(newPassword, reason) {
+  const next = await crypto.deriveKeys(
+    newPassword,
+    state.email,
+    crypto.randomBytes(crypto.SALT_BYTES),
+    crypto.defaultKdfParams()
+  );
+  state.data.saved_at = Date.now();
+  const envelope = await crypto.encryptVault(next.vaultKey, state.data, next.saltB64, next.kdfParams);
+  if (state.account) {
+    const result = await api.rekey(
+      state.authKeyB64,
+      { authKeyB64: crypto.bytesToB64(next.authKeyBytes), saltB64: next.saltB64, kdfParams: next.kdfParams },
+      envelope,
+      reason
+    );
+    state.account = result.account;
+  }
+  applyKeys(next);
+  await vault.idbPut(state.email, envelope, { cloud: state.cloudLinked });
+}
+
+function setPasswordStatus(message, kind) {
+  el["pw-status"].textContent = message || "";
+  el["pw-status"].dataset.kind = kind || "";
+}
+
+async function changePassword(event) {
+  event.preventDefault();
+  const current = el["pw-current"].value;
+  const next = el["pw-new"].value;
+  if (next.length < crypto.MIN_MASTER_LENGTH) {
+    setPasswordStatus("The new master password must be at least 12 characters.", "error");
+    return;
+  }
+  if (next !== el["pw-new2"].value) {
+    setPasswordStatus("The new passwords do not match.", "error");
+    return;
+  }
+  if (next === current) {
+    setPasswordStatus("Choose a password different from the current one.", "error");
+    return;
+  }
+  setPasswordStatus("Checking the current password…");
+  try {
+    const check = await crypto.deriveKeys(current, state.email, state.saltB64, state.kdfParams);
+    if (crypto.bytesToB64(check.authKeyBytes) !== state.authKeyB64) {
+      setPasswordStatus("The current master password is wrong.", "error");
+      return;
+    }
+  } catch (err) {
+    setPasswordStatus("The current master password is wrong.", "error");
+    return;
+  }
+  if (state.cloudLinked && !state.account) {
+    if (
+      !window.confirm(
+        "You are not signed in to the cloud, so the cloud account keeps the old password. Change it on this device only?"
+      )
+    ) {
+      setPasswordStatus("");
+      return;
+    }
+  }
+  setPasswordStatus("Re-encrypting…");
+  try {
+    await rekeyVault(next, "change");
+  } catch (err) {
+    setPasswordStatus("Nothing was changed: " + (err.message || "the server refused"), "error");
+    return;
+  }
+  ["pw-current", "pw-new", "pw-new2"].forEach(function (id) {
+    el[id].value = "";
+  });
+  setPasswordStatus("");
+  closeDialog(el["password-dialog"]);
+  renderAccount();
+  ui.toast(
+    state.account
+      ? "Master password changed. Other devices must sign in again with the new password."
+      : "Master password changed on this device."
+  );
 }
 
 async function createVault(event) {
@@ -776,6 +991,7 @@ async function createVault(event) {
     state.kdfParams = keys.kdfParams;
     state.data = vault.emptyVault();
     state.account = null;
+    state.cloudLinked = false;
     await persist();
     if (el["create-cloud"].checked) {
       try {
@@ -783,10 +999,8 @@ async function createVault(event) {
         state.account = created.account;
       } catch (err) {
         if (err.status === 409) {
-          try {
-            const session = await api.login(email, state.authKeyB64);
-            state.account = session.mfa_required ? await completeSecondFactor(session) : session.account;
-          } catch (loginErr) {
+          state.account = await signIn(email, keys);
+          if (!state.account) {
             setLockStatus(
               "Local vault created, but that email already has a cloud account with a different master password.",
               "warn"
@@ -797,9 +1011,14 @@ async function createVault(event) {
         }
       }
     }
+    if (state.account) {
+      state.cloudLinked = true;
+      await persist();
+    }
     el["create-password"].value = "";
     el["create-password2"].value = "";
     await afterUnlock();
+    markReady();
     ui.toast("Vault created. If you forget the master password, the contents are gone.");
   } catch (err) {
     setLockStatus(err.message || "Could not create the vault.", "error");
@@ -957,11 +1176,7 @@ function wire() {
     renderAudit(true);
   });
   el["btn-account"].addEventListener("click", function () {
-    if (typeof el["account-dialog"].showModal === "function") {
-      el["account-dialog"].showModal();
-    } else {
-      el["account-dialog"].hidden = !el["account-dialog"].hidden;
-    }
+    openDialog(el["account-dialog"]);
   });
   el["entry-form"].addEventListener("submit", saveEntry);
   el["entry-kind"].addEventListener("change", toggleKind);
@@ -1020,6 +1235,8 @@ function wire() {
       await api.deleteAccount(state.authKeyB64);
       ui.toast("Cloud account deleted.");
       state.account = null;
+      state.cloudLinked = false;
+      await persist();
       renderAccount();
     } catch (err) {
       ui.toast(err.message, "error");
@@ -1027,6 +1244,18 @@ function wire() {
   });
   el["btn-hibp"].addEventListener("click", hibpCheck);
   el["btn-passkey-add"].addEventListener("click", addPasskey);
+  el["btn-change-password"].addEventListener("click", function () {
+    closeDialog(el["account-dialog"]);
+    setPasswordStatus("");
+    openDialog(el["password-dialog"]);
+  });
+  el["password-form"].addEventListener("submit", changePassword);
+  el["pw-cancel"].addEventListener("click", function () {
+    ["pw-current", "pw-new", "pw-new2"].forEach(function (id) {
+      el[id].value = "";
+    });
+    closeDialog(el["password-dialog"]);
+  });
   el["btn-recovery-regen"].addEventListener("click", regenerateRecovery);
   el["account-close"].addEventListener("click", function () {
     closeDialog(el["account-dialog"]);

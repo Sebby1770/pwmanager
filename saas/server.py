@@ -49,6 +49,7 @@ from saas.config import (
 )
 from saas.db import Database, account_public, blob_to_envelope, is_pro
 from saas.envelope import EnvelopeError, envelope_byte_size, envelope_parts, parse_envelope
+from saas.kdf import rank as kdf_rank
 from saas.mfa import Mfa, MfaError, rp_for
 from saas.stripeutil import (
     StripeError,
@@ -86,6 +87,11 @@ STATIC_CSP = (
     "connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; "
     "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 )
+
+# The vault page runs Argon2id in WebAssembly. 'wasm-unsafe-eval' permits
+# compiling WASM only; JavaScript eval() and inline scripts stay blocked.
+VAULT_CSP = STATIC_CSP.replace("script-src 'self'", "script-src 'self' 'wasm-unsafe-eval'")
+WASM_PAGES = frozenset({"vault.html"})
 
 
 class App:
@@ -415,6 +421,9 @@ def make_handler(app: App):
             if method == "POST" and path == "/api/account/delete":
                 self._account_delete()
                 return
+            if method == "POST" and path == "/api/account/rekey":
+                self._account_rekey()
+                return
             if method == "GET" and path == "/api/account/export":
                 self._account_export()
                 return
@@ -738,6 +747,82 @@ def make_handler(app: App):
             result = apply_webhook_event(self.app.db, event)
             self._json(200, result)
 
+        def _account_rekey(self) -> None:
+            """Change the master key: a new password, a KDF upgrade, or both.
+
+            The client proves the current master password (auth_key), sends the
+            new authKey, salt and params, and the vault re-encrypted under the
+            new vaultKey. The server cannot check that ciphertext, but it does
+            refuse anything that would leave the account half-migrated.
+            """
+            account, _token = self._require_account()
+            if account is None:
+                return
+            # Larger cap than other JSON routes: the body carries the vault.
+            raw = self._read_body(HTTP_BODY_MAX_BYTES)
+            if raw is None:
+                return
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._error(400, "bad_json", "Body must be JSON")
+                return
+            if not isinstance(body, dict):
+                self._error(400, "bad_json", "JSON object required")
+                return
+            if not self._reauth(account, body):
+                return
+            try:
+                new_auth_key = decode_auth_key(str(body.get("new_auth_key") or ""))
+                new_salt = str(body.get("new_kdf_salt") or "").strip()
+                decode_salt(new_salt)
+                new_params = canonical_kdf_params(body.get("new_kdf_params"))
+            except ValueError as exc:
+                self._error(400, "bad_request", str(exc))
+                return
+            current_params = account_public(account)["kdf_params"]
+            if kdf_rank(new_params) < kdf_rank(current_params):
+                self._error(400, "kdf_downgrade", "A rekey can never move to a weaker key-derivation scheme")
+                return
+            if new_salt == account["kdf_salt"]:
+                self._error(400, "salt_reused", "A rekey must use a fresh random salt")
+                return
+            if verify_auth_key(account["auth_verifier"], new_auth_key):
+                self._error(400, "key_unchanged", "The new key is the same as the current one")
+                return
+
+            existing = self.app.db.get_vault(account["id"])
+            blob = None
+            if body.get("envelope") is not None:
+                envelope = parse_envelope(body["envelope"])
+                if envelope["kdf"]["salt"] != new_salt or envelope["kdf"]["alg"] != new_params["alg"]:
+                    self._error(400, "envelope_mismatch", "The envelope must be sealed with the new key")
+                    return
+                size = envelope_byte_size(envelope)
+                if size > PRO_VAULT_MAX_BYTES:
+                    self._error(413, "vault_too_large", f"Vault exceeds the {PRO_VAULT_MAX_BYTES} byte limit")
+                    return
+                # Free accounts may re-seal a blob they already have, never
+                # create one: that would bypass the Pro check on PUT /api/vault.
+                if existing is not None or is_pro(account):
+                    ct, nonce, version = envelope_parts(envelope)
+                    blob = {"ct": ct, "nonce": nonce, "v": version, "size": size}
+            elif existing is not None:
+                self._error(400, "envelope_required", "Re-encrypt the cloud vault with the new key and send it")
+                return
+
+            reason = "kdf_upgraded" if str(body.get("reason") or "") == "kdf_upgrade" else "master_password_changed"
+            token = self.app.db.rekey_account(
+                account["id"], new_auth_key, new_salt, new_params, blob, self.headers.get("User-Agent") or ""
+            )
+            self.app.db.audit(account["id"], reason, self._client_ip())
+            fresh = self.app.db.get_account_by_id(account["id"])
+            self._json(
+                200,
+                {"account": self._public(fresh), "vault_replaced": blob is not None},
+                extra=[("Set-Cookie", self._cookie(token))],
+            )
+
         def _account_delete(self) -> None:
             account, token = self._require_account()
             if account is None:
@@ -814,7 +899,8 @@ def make_handler(app: App):
             extra = None
             if target.suffix in {".css", ".js", ".svg"}:
                 extra = [("Cache-Control", "public, max-age=300")]
-            self._send(200, data, content_type, extra=extra, csp=STATIC_CSP)
+            csp = VAULT_CSP if target.name in WASM_PAGES else STATIC_CSP
+            self._send(200, data, content_type, extra=extra, csp=csp)
 
     return Handler
 

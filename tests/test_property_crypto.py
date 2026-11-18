@@ -228,32 +228,38 @@ def test_parse_envelope_never_keeps_unknown_kdf_fields(extra):
     env = _valid_envelope()
     env["kdf"] = {**extra, **env["kdf"]}
     out = parse_envelope(env)
-    assert set(out["kdf"]) == {"alg", "hash", "iterations", "dk_len", "salt", "email_mix"}
+    from saas.kdf import legacy_params
+
+    assert set(out["kdf"]) == set(legacy_params()) | {"salt"}
 
 
 JS_ENVELOPE = """
+import "./tests/js/argon2_node.mjs";
 import { deriveKeys, encryptVault, b64ToBytes } from "./web/saas/crypto.js";
-const [password, email, salt] = process.argv.slice(-3);
-const keys = await deriveKeys(password, email, b64ToBytes(salt));
-const env = await encryptVault(keys.vaultKey, { version: 1, entries: [{ name: "x", password: "y" }] }, keys.saltB64);
+const [password, email, salt, params] = process.argv.slice(-4);
+const keys = await deriveKeys(password, email, b64ToBytes(salt), JSON.parse(params));
+const env = await encryptVault(keys.vaultKey, { version: 1, entries: [{ name: "x", password: "y" }] }, keys.saltB64, keys.kdfParams);
 console.log(JSON.stringify(env));
 """
 
 
-@pytest.fixture(scope="module")
-def js_envelope():
+@pytest.fixture(scope="module", params=["v1", "v2"])
+def js_envelope(request):
     """A real envelope produced by the browser crypto module, plus its vaultKey."""
     if shutil.which("node") is None:
         pytest.skip("node not installed")
+    from pwmanager import cloudkdf
+
+    params = cloudkdf.legacy_params() if request.param == "v1" else cloudkdf.default_params()
     email, password = "interop@example.com", "interop master password"
     salt = bytes(range(32))
     out = subprocess.run(
-        ["node", "--input-type=module", "-e", JS_ENVELOPE, password, email, base64.b64encode(salt).decode()],
+        ["node", "--input-type=module", "-e", JS_ENVELOPE, password, email,
+         base64.b64encode(salt).decode(), json.dumps(params)],
         cwd=ROOT, capture_output=True, text=True, check=True, timeout=60,
     )
     envelope = json.loads(out.stdout)
-    mixed = hashlib.sha256(salt + email.encode()).digest()
-    vault_key = hashlib.pbkdf2_hmac("sha256", password.encode(), mixed, 600_000, 64)[:32]
+    vault_key, _auth, _ = cloudkdf.derive_keys(password, email, salt, params)
     return envelope, vault_key
 
 

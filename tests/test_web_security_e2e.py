@@ -161,10 +161,14 @@ def test_zero_knowledge_nothing_but_auth_key_leaves_the_browser(browser, server,
     finally:
         ctx.close()
 
+    from pwmanager import cloudkdf
+
     salt = base64.b64decode(account["kdf_salt"])
+    params = json.loads(account["kdf_params"])
+    assert params["alg"] == "argon2id", "new accounts register with Argon2id"
+    vault_key, auth_key, _ = cloudkdf.derive_keys(PASSWORD, email, salt, params)
     mixed = hashlib.sha256(salt + email.encode()).digest()
     material = hashlib.pbkdf2_hmac("sha256", PASSWORD.encode(), mixed, 600_000, 64)
-    vault_key, auth_key = material[:32], material[32:]
 
     forbidden = {
         "master password": PASSWORD,
@@ -172,7 +176,7 @@ def test_zero_knowledge_nothing_but_auth_key_leaves_the_browser(browser, server,
         "entry notes": "private note text",
         "vaultKey (b64)": base64.b64encode(vault_key).decode(),
         "vaultKey (hex)": vault_key.hex(),
-        "full KDF output": base64.b64encode(material).decode(),
+        "PBKDF2 output (v1 scheme)": base64.b64encode(material).decode(),
     }
     wire = json.dumps(seen)
     for label, value in forbidden.items():

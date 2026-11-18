@@ -273,7 +273,7 @@ def test_register_validation(make_api, monkeypatch):
     assert req({"email": "a@example.com", "auth_key": b64(32), "kdf_salt": b64(32), "kdf_params": "x"})[1]["error"] == "bad_request"
     assert req({"email": "a@example.com", "auth_key": b64(32), "kdf_salt": b64(32), "kdf_params": {"alg": "scrypt"}})[0] == 400
     status, body = req({"email": "a@example.com", "auth_key": b64(32), "kdf_salt": b64(32)})
-    assert status == 201 and body["account"]["kdf_params"]["iterations"] == 600000
+    assert status == 201 and body["account"]["kdf_params"]["alg"] == "argon2id"  # new default
 
 
 def test_rate_limits_on_register_and_prelogin(make_api):
@@ -433,7 +433,7 @@ def test_auth_helpers():
         auth.canonical_kdf_params({"iterations": "many"})
     with pytest.raises(ValueError, match="at most"):
         auth.canonical_kdf_params({"iterations": 10**9})
-    assert auth.canonical_kdf_params(None)["iterations"] == 600000
+    assert auth.canonical_kdf_params(None)["alg"] == "argon2id"
     assert auth.canonical_kdf_params({"iterations": "700000"})["iterations"] == 700000
 
 

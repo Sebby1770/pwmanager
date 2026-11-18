@@ -110,7 +110,11 @@ def test_served_vault_page_has_strict_csp(browser, make_api):
         page = ctx.new_page()
         response = page.goto(f"http://127.0.0.1:{api.port}/vault.html")
         csp = response.headers["content-security-policy"]
-        assert "script-src 'self'" in csp and "unsafe-inline" not in csp and "unsafe-eval" not in csp
+        tokens = csp.replace(";", " ").split()
+        assert "script-src" in tokens and "'self'" in tokens
+        # 'wasm-unsafe-eval' (for Argon2) compiles WebAssembly only; JS eval and
+        # inline script stay blocked.
+        assert "'unsafe-inline'" not in tokens and "'unsafe-eval'" not in tokens
         # An injected inline script (the usual XSS payload shape) must not run.
         ran = page.evaluate(
             """() => new Promise(resolve => {
@@ -121,5 +125,30 @@ def test_served_vault_page_has_strict_csp(browser, make_api):
                })"""
         )
         assert ran is False
+    finally:
+        ctx.close()
+
+
+def test_dialogs_still_open_after_escape_and_lock(browser, make_api):
+    """closeDialog() used to set `hidden` on closed <dialog>s, which showModal()
+    never clears: one Escape press and the help dialog could not open again."""
+    api = make_api()
+    ctx = browser.new_context(bypass_csp=True)
+    try:
+        page = ctx.new_page()
+        v = VaultPage(page, f"http://127.0.0.1:{api.port}").open()
+        v.create("dialogs@example.com", cloud=False)
+        page.keyboard.press("Escape")
+        page.keyboard.press("?")
+        page.wait_for_selector("#help-dialog", state="visible")
+        page.click("#help-close")
+        page.click("#btn-account")
+        page.wait_for_selector("#account-dialog", state="visible")
+        page.click("#account-close")
+        v.lock()
+        v.unlock("dialogs@example.com")
+        page.click("#btn-account")
+        page.click("#btn-change-password")
+        page.wait_for_selector("#password-dialog", state="visible")
     finally:
         ctx.close()

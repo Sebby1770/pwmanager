@@ -63,3 +63,18 @@ class VaultPage:
         self.page.wait_for_function(
             "document.getElementById('sync-status').textContent === 'Cloud copy updated'", timeout=10_000
         )
+
+    def change_password(self, current: str, new: str, confirm: str = None):
+        p = self.page
+        p.click("#btn-account")
+        p.click("#btn-change-password")
+        p.fill("#pw-current", current)
+        p.fill("#pw-new", new)
+        p.fill("#pw-new2", confirm if confirm is not None else new)
+        p.click("#pw-submit")
+
+    def idb_record(self, email: str):
+        """The raw IndexedDB record (ciphertext envelope + flags) for an email."""
+        return self.page.evaluate(
+            "async (email) => { const v = await import('/saas/vault.js'); return v.idbGet(email); }", email
+        )
