@@ -47,7 +47,7 @@ from saas.config import (
     WEBHOOK_BODY_MAX_BYTES,
     load_config,
 )
-from saas.db import Database, account_public, blob_to_envelope, is_pro
+from saas.db import Database, VaultConflict, account_public, blob_to_envelope, is_pro, vault_etag
 from saas.envelope import EnvelopeError, envelope_byte_size, envelope_parts, parse_envelope
 from saas.kdf import rank as kdf_rank
 from saas.mfa import Mfa, MfaError, rp_for
@@ -217,7 +217,7 @@ def make_handler(app: App):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Authorization, Content-Type, Stripe-Signature",
+                "Authorization, Content-Type, Stripe-Signature, If-Match, If-None-Match",
             )
             self.send_header("Access-Control-Max-Age", "600")
             self.send_header("Content-Length", "0")
@@ -689,8 +689,20 @@ def make_handler(app: App):
                 self._error(413, "vault_too_large", "Vault exceeds the Free size limit")
                 return
             ct, nonce, version = envelope_parts(envelope)
+            if_match = (self.headers.get("If-Match") or "").strip()
+            if if_match and not if_match.startswith('"'):
+                if_match = '"' + if_match + '"'
+            if_none_match = (self.headers.get("If-None-Match") or "").strip() == "*"
             try:
-                self.app.db.put_vault(account["id"], ct, nonce, version, size, pro=True)
+                self.app.db.put_vault(
+                    account["id"], ct, nonce, version, size, pro=True,
+                    if_match=if_match or None, if_none_match=if_none_match,
+                )
+            except VaultConflict:
+                current = vault_etag(self.app.db.get_vault(account["id"]))
+                self._error(409, "vault_conflict", "The cloud vault changed since you read it. Fetch, merge and retry.",
+                            extra={"etag": current})
+                return
             except ValueError as exc:
                 if str(exc) == "vault_too_large":
                     self._error(413, "vault_too_large", "Vault exceeds the stored size limit")
@@ -704,7 +716,9 @@ def make_handler(app: App):
                     "ok": True,
                     "byte_size": stored["byte_size"] if stored else size,
                     "updated_at": stored["updated_at"] if stored else None,
+                    "etag": vault_etag(stored),
                 },
+                extra=[("ETag", vault_etag(stored))] if stored else None,
             )
 
         def _vault_get(self) -> None:
@@ -716,7 +730,12 @@ def make_handler(app: App):
                 self._error(404, "no_vault", "No cloud vault has been stored for this account")
                 return
             pub = account_public(account)
-            self._json(200, {"envelope": blob_to_envelope(row, pub["kdf_salt"], pub["kdf_params"])})
+            etag = vault_etag(row)
+            self._json(
+                200,
+                {"envelope": blob_to_envelope(row, pub["kdf_salt"], pub["kdf_params"]), "etag": etag},
+                extra=[("ETag", etag)],
+            )
 
         def _vault_revisions(self) -> None:
             account, _token = self._require_account()

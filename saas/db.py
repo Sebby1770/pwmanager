@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -26,6 +27,18 @@ from saas.auth import (
     verify_auth_key,
 )
 from saas.config import FREE_VAULT_MAX_BYTES, PRO_VAULT_MAX_BYTES, REVISION_CAP, SCHEMA_PATH
+
+
+class VaultConflict(Exception):
+    """The stored vault no longer matches the version the client last read."""
+
+
+def vault_etag(row: Optional[sqlite3.Row]) -> Optional[str]:
+    """Strong validator for a stored blob (changes whenever the ciphertext does)."""
+    if row is None:
+        return None
+    digest = hashlib.sha256((row["nonce"] + "." + row["ciphertext"]).encode("ascii")).hexdigest()
+    return '"' + digest[:32] + '"'
 
 
 class Database:
@@ -390,7 +403,11 @@ class Database:
         aad_version: int,
         byte_size: int,
         pro: bool,
+        if_match: Optional[str] = None,
+        if_none_match: bool = False,
     ) -> None:
+        """Store a new blob. ``if_match`` / ``if_none_match`` make it conditional,
+        checked under the same lock as the write so two clients cannot both win."""
         limit = PRO_VAULT_MAX_BYTES if pro else FREE_VAULT_MAX_BYTES
         if byte_size > limit:
             raise ValueError("vault_too_large")
@@ -400,6 +417,10 @@ class Database:
                 "SELECT * FROM vault_blobs WHERE account_id = ?",
                 (account_id,),
             ).fetchone()
+            if if_none_match and current is not None:
+                raise VaultConflict()
+            if if_match is not None and vault_etag(current) != if_match:
+                raise VaultConflict()
             if current is not None and pro:
                 self._conn.execute(
                     """

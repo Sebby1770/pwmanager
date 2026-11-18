@@ -4,7 +4,7 @@ A password manager in three parts that share a threat model but not code:
 
 | Path | What it is |
 |------|------------|
-| `pwmanager/` | Python CLI vault. `cli.py` (commands), `vault.py` (file format, entry ops), `crypto.py` (KDF, AEAD, file HMAC), `importers.py` (Bitwarden / 1Password / Chrome CSV, Bitwarden JSON), `totp.py`, `hibp.py`, `audit.py`. Works fully offline with no account. |
+| `pwmanager/` | Python CLI vault. `cli.py` (commands), `vault.py` (file format, entry ops), `crypto.py` (KDF, AEAD, file HMAC), `importers.py` (Bitwarden / 1Password / Chrome CSV, Bitwarden JSON), `cloud.py` + `cloudkdf.py` (`pwmanager cloud` sync with the web vault; three-way merge), `totp.py`, `hibp.py`, `audit.py`. Works fully offline with no account. |
 | `saas/` | stdlib HTTP API + static server (only `webauthn` is an optional extra) for the web vault. `server.py` (routes), `auth.py` (auth-key hashing, sessions, rate limits), `envelope.py` (validates ciphertext envelopes), `db.py` (SQLite), `stripeutil.py` (Checkout + webhooks), `mfa.py` (passkey second factor + recovery codes), `schema.sql`. |
 | `web/` | Static site. `web/saas/*.js` is the zero-knowledge browser vault (ES modules, no bundler); `web/generator.js` + `web/app.js` are the standalone generator page. |
 | `tests/` | pytest suite (`tests/test_*.py`) and zero-dependency Node tests (`tests/js/*.mjs`). |

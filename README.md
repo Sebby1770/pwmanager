@@ -173,6 +173,31 @@ unset PWMANAGER_PASSWORD
 
 **Never** document or store production master passwords in shell profiles, Docker Compose files, or CI secrets that end up in logs. Prefer interactive prompt or OS keychain wrappers outside this tool. See [SECURITY.md](SECURITY.md).
 
+### Cloud sync (`pwmanager cloud`)
+
+Link a local CLI vault to a cloud account and keep it in sync with the web
+vault. The server still only ever sees ciphertext:
+
+```bash
+pwmanager cloud login --server https://vault.example.com --email me@example.com
+pwmanager cloud sync            # two-way: newest edit wins, deletions propagate
+pwmanager cloud sync --dry-run  # show what would change
+pwmanager cloud pull            # cloud -> this vault only (works on the Free plan)
+pwmanager cloud status
+pwmanager cloud logout          # end the session and unlink; the local vault is untouched
+```
+
+- The **cloud master password** (the web vault's) is asked for on every sync and
+  never stored. The local vault keeps its own master password.
+- Keys are derived exactly as in the browser (Argon2id + HKDF, or legacy PBKDF2),
+  and the client refuses weaker settings than it has already used.
+- The link file (`~/.config/pwmanager/cloud/*.json`, mode 0600) holds the server,
+  email, session token, a key-check value and the ids and timestamps of the last
+  sync. It holds nothing that decrypts the vault.
+- Accounts with passkeys sign in from the terminal with a one-time recovery code.
+- `http://` is refused except to `localhost`.
+- Uploading needs Pro; concurrent edits are merged, not overwritten (`If-Match`).
+
 ### Rotation reminders
 
 - Default rotation window: **90 days** (`ROTATE_DEFAULT_DAYS`).

@@ -995,6 +995,81 @@ def cmd_import(vault: Vault) -> None:
         print(C.red(f"Import failed: {e}\n"))
 
 
+def _cloud_password(password_env: bool) -> str:
+    if password_env:
+        return os.environ.get("PWMANAGER_CLOUD_PASSWORD", "")
+    return prompt_secret("Cloud master password (the one you use in the web vault)")
+
+
+def _recovery_code(password_env: bool) -> str:
+    if password_env:
+        return os.environ.get("PWMANAGER_CLOUD_RECOVERY_CODE", "")
+    print(C.yellow("This account uses a passkey. A terminal cannot use passkeys, so enter one of"))
+    print(C.yellow("your one-time recovery codes instead (it will be used up)."))
+    return prompt_secret("Recovery code")
+
+
+def cmd_cloud_account(args, vault_path: str, *, password_env: bool = False) -> int:
+    """cloud login / status / logout: no local unlock needed."""
+    from pwmanager import cloud
+
+    try:
+        if args.cloud_command == "login":
+            server = args.server or prompt("Cloud server URL")
+            email = args.email or prompt("Cloud account email")
+            password = _cloud_password(password_env)
+            if not (server and email and password):
+                print(C.red("Server, email and cloud master password are all required."), file=sys.stderr)
+                return 1
+            state = cloud.login(vault_path, server, email, password, lambda: _recovery_code(password_env))
+            account = state["account"]
+            print(C.green(f"Linked {vault_path} to {state['email']} on {state['server']}."))
+            print(C.dim(f"Plan: {'Pro' if account.get('pro') else 'Free (pull only)'}. "
+                        "Nothing that can decrypt your vault was stored."))
+            if account.get("recovery_codes_left") is not None and account["recovery_codes_left"] < 3:
+                print(C.yellow(f"Only {account['recovery_codes_left']} recovery codes left: make new ones in the web vault."))
+            return 0
+        if args.cloud_command == "status":
+            info = cloud.status(vault_path)
+            account = info["account"]
+            print(f"Linked to {info['email']} on {info['server']}")
+            print(f"Plan: {'Pro' if account.get('pro') else 'Free'} · passkeys: "
+                  f"{'on' if account.get('mfa_enabled') else 'off'} · KDF: {account['kdf_params'].get('alg')}")
+            print(f"Entries tracked since last sync: {info['synced_entries']}")
+            return 0
+        if cloud.logout(vault_path):
+            print(C.green("Signed out and unlinked. The local vault is unchanged."))
+        else:
+            print(C.dim("This vault was not linked to a cloud account."))
+        return 0
+    except cloud.CloudError as exc:
+        print(C.red(str(exc)), file=sys.stderr)
+        return 1
+
+
+def cmd_cloud_sync(vault: Vault, args, *, password_env: bool = False) -> int:
+    from pwmanager import cloud
+
+    password = _cloud_password(password_env)
+    if not password:
+        print(C.red("Cloud master password required."), file=sys.stderr)
+        return 1
+    try:
+        report = cloud.sync(vault, password, mode=args.cloud_command, dry_run=args.dry_run)
+    except cloud.CloudError as exc:
+        print(C.red(str(exc)), file=sys.stderr)
+        return 1
+    lines = report.lines()
+    prefix = "Would have " if args.dry_run else ""
+    if not lines:
+        print(C.green("Already in sync."))
+    for line in lines:
+        print(f"  {prefix}{line}")
+    if report.conflicts:
+        print(C.yellow("  Older versions' passwords were kept in each entry's history."))
+    return 0
+
+
 def cmd_import_csv(
     vault: Vault,
     path: Optional[str] = None,
@@ -1770,6 +1845,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="What to do when entry name already exists",
     )
 
+    cloud_p = sub.add_parser("cloud", help="Sync this vault with a pwmanager cloud account (zero-knowledge)")
+    cloud_sub = cloud_p.add_subparsers(dest="cloud_command", required=True)
+    cl_login = cloud_sub.add_parser("login", help="Link this vault to a cloud account")
+    cl_login.add_argument("--server", default=os.environ.get("PWMANAGER_CLOUD_URL", ""),
+                          help="Server URL, e.g. https://vault.example.com (or PWMANAGER_CLOUD_URL)")
+    cl_login.add_argument("--email", default="", help="Cloud account email")
+    cloud_sub.add_parser("status", help="Show the linked account and session")
+    cloud_sub.add_parser("logout", help="End the cloud session and unlink this vault")
+    for name, text in (("sync", "Two-way sync (newest edit wins; deletions propagate)"),
+                       ("pull", "Bring cloud changes into this vault; upload nothing")):
+        sp = cloud_sub.add_parser(name, help=text)
+        sp.add_argument("--dry-run", action="store_true", help="Show what would change, change nothing")
+
     comp = sub.add_parser("completions", help="Print shell completion script")
     comp.add_argument(
         "shell",
@@ -1791,6 +1879,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Completions / gen / doctor don't need vault unlock
     if args.command == "completions":
         return cmd_completions(args.shell)
+
+    if args.command == "cloud" and args.cloud_command in {"login", "status", "logout"}:
+        vault_path = default_vault_path(
+            vault_arg=getattr(args, "vault", None),
+            profile_arg=getattr(args, "profile", None),
+        )
+        return cmd_cloud_account(args, vault_path, password_env=password_env)
 
     if args.command == "doctor":
         vault_path = default_vault_path(
@@ -1948,6 +2043,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd_recent(vault, limit=int(getattr(args, "limit", 10) or 10))
         elif args.command == "verify":
             exit_code = cmd_verify(vault)
+        elif args.command == "cloud":
+            exit_code = cmd_cloud_sync(vault, args, password_env=password_env)
         elif args.command == "import-csv":
             cmd_import_csv(
                 vault,
