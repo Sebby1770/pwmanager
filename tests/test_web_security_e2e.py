@@ -132,13 +132,18 @@ def test_f7_rolled_back_cloud_copy_does_not_replace_newer_local(browser, server)
 
 
 def test_zero_knowledge_nothing_but_auth_key_leaves_the_browser(browser, server, capfd):
-    """Record every request; recompute the keys; only authKey may appear on the wire."""
+    """Record every request; recompute the keys; only authKey may appear on the wire.
+
+    Covers sign-up, sync, a master-password change (rekey) and account deletion.
+    """
     import base64
     import hashlib
     import json
 
+    from pwmanager import cloudkdf
     from tests.e2e_helpers import PASSWORD
 
+    new_password = "the replacement master password"
     base = f"http://127.0.0.1:{server.port}"
     email = "zk@example.com"
     ctx = _context(browser, server)
@@ -148,12 +153,17 @@ def test_zero_knowledge_nothing_but_auth_key_leaves_the_browser(browser, server,
         page.on("request", lambda r: seen.append((r.url, dict(r.headers), r.post_data or "")))
         v = VaultPage(page, base).open()
         v.create(email, cloud=True)
-        account = server.db.get_account_by_email(email)
-        make_pro(server, account["id"])
+        before = server.db.get_account_by_email(email)
+        make_pro(server, before["id"])
         v.lock()
         v.unlock(email)
         v.add_entry("site", password="entry-secret-Zq9!", notes="private note text")
         v.wait_synced()
+        v.change_password(PASSWORD, new_password)
+        page.wait_for_selector("#password-dialog", state="hidden")
+        after = server.db.get_account_by_email(email)
+        dump = "\n".join(str(tuple(r)) for r in server.db.execute("SELECT * FROM accounts").fetchall())
+        dump += "\n".join(str(tuple(r)) for r in server.db.execute("SELECT * FROM vault_blobs").fetchall())
         page.on("dialog", lambda d: d.accept())
         page.click("#btn-account")
         page.click("#btn-delete-account")
@@ -161,33 +171,45 @@ def test_zero_knowledge_nothing_but_auth_key_leaves_the_browser(browser, server,
     finally:
         ctx.close()
 
-    salt = base64.b64decode(account["kdf_salt"])
-    mixed = hashlib.sha256(salt + email.encode()).digest()
+    keys = {}
+    for label, password, row in (("old", PASSWORD, before), ("new", new_password, after)):
+        salt = base64.b64decode(row["kdf_salt"])
+        params = json.loads(row["kdf_params"])
+        assert params["alg"] == "argon2id", "accounts use Argon2id"
+        keys[label] = cloudkdf.derive_keys(password, email, salt, params)
+    assert before["kdf_salt"] != after["kdf_salt"]
+    mixed = hashlib.sha256(base64.b64decode(before["kdf_salt"]) + email.encode()).digest()
     material = hashlib.pbkdf2_hmac("sha256", PASSWORD.encode(), mixed, 600_000, 64)
-    vault_key, auth_key = material[:32], material[32:]
 
     forbidden = {
-        "master password": PASSWORD,
+        "old master password": PASSWORD,
+        "new master password": new_password,
         "entry password": "entry-secret-Zq9!",
         "entry notes": "private note text",
-        "vaultKey (b64)": base64.b64encode(vault_key).decode(),
-        "vaultKey (hex)": vault_key.hex(),
-        "full KDF output": base64.b64encode(material).decode(),
+        "PBKDF2 output (v1 scheme)": base64.b64encode(material).decode(),
     }
+    for label, (vault_key, _auth, _p) in keys.items():
+        forbidden[f"{label} vaultKey (b64)"] = base64.b64encode(vault_key).decode()
+        forbidden[f"{label} vaultKey (hex)"] = vault_key.hex()
     wire = json.dumps(seen)
     for label, value in forbidden.items():
         assert value not in wire, f"{label} reached the network"
 
-    auth_b64 = base64.b64encode(auth_key).decode()
+    old_auth = base64.b64encode(keys["old"][1]).decode()
+    new_auth = base64.b64encode(keys["new"][1]).decode()
     api_bodies = [json.loads(body) for url, _h, body in seen if "/api/" in url and body]
-    sent_auth = {b["auth_key"] for b in api_bodies if "auth_key" in b}
-    assert sent_auth == {auth_b64}, "the only derived value sent must be authKey"
-    allowed = {"email", "auth_key", "kdf_salt", "kdf_params", "confirm", "v", "nonce", "ct", "kdf", "updated_at"}
+    sent_auth = {b[k] for b in api_bodies for k in ("auth_key", "new_auth_key") if k in b}
+    assert sent_auth == {old_auth, new_auth}, "the only derived values sent are authKeys"
+    rekey = [b for b in api_bodies if "new_auth_key" in b]
+    assert len(rekey) == 1 and rekey[0]["auth_key"] == old_auth and rekey[0]["new_auth_key"] == new_auth
+    allowed = {"email", "auth_key", "kdf_salt", "kdf_params", "confirm", "v", "nonce", "ct", "kdf", "updated_at",
+               "new_auth_key", "new_kdf_salt", "new_kdf_params", "envelope", "reason"}
     for body in api_bodies:
         assert set(body) <= allowed, set(body) - allowed
 
-    # The server never stores authKey itself, and its log shows only request lines.
-    dump = "\n".join(str(tuple(r)) for r in server.db.execute("SELECT * FROM accounts").fetchall())
-    assert auth_b64 not in dump and auth_key.hex() not in dump
+    # The server never stores an authKey itself, and its log shows only request lines.
+    for auth in (old_auth, new_auth):
+        assert auth not in dump and base64.b64decode(auth).hex() not in dump
     log = capfd.readouterr().err
-    assert auth_b64 not in log and PASSWORD not in log
+    for secret in (old_auth, new_auth, PASSWORD, new_password):
+        assert secret not in log

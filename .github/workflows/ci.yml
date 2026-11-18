@@ -34,7 +34,7 @@ jobs:
       - name: Coverage gate (security-critical modules >= 90%)
         run: |
           python -m coverage report --fail-under=90 \
-            --include="pwmanager/crypto.py,pwmanager/vault.py,pwmanager/importers.py,saas/*"
+            --include="pwmanager/crypto.py,pwmanager/vault.py,pwmanager/importers.py,pwmanager/cloudkdf.py,saas/*"
           echo "--- whole package (informational) ---"
           python -m coverage report | tail -1
 
@@ -57,6 +57,7 @@ jobs:
         run: |
           node tests/js/saas_crypto.mjs
           node tests/js/saas_vault.mjs
+          node tests/js/saas_kdf.mjs
 
       - name: Check the bundled web wordlist is in sync
         run: |

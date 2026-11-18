@@ -141,3 +141,39 @@ export async function deletePasskey(id, authKeyB64) {
 export async function regenerateRecoveryCodes(authKeyB64) {
   return request("POST", "/api/webauthn/recovery-codes", { auth_key: authKeyB64 });
 }
+
+/* ---- master key changes ---- */
+
+/**
+ * Change the master key (new password, KDF upgrade, or both). `current` is the
+ * auth key for the password in use now; `next` carries the new auth key, salt
+ * and params plus the vault sealed under the new vault key.
+ */
+export async function rekey(currentAuthKeyB64, next, envelope, reason) {
+  return request("POST", "/api/account/rekey", {
+    auth_key: currentAuthKeyB64,
+    new_auth_key: next.authKeyB64,
+    new_kdf_salt: next.saltB64,
+    new_kdf_params: next.kdfParams,
+    envelope: envelope,
+    reason: reason
+  });
+}
+
+/* ---- signed-in devices and security events ---- */
+
+export async function sessions() {
+  return request("GET", "/api/sessions");
+}
+
+export async function revokeSession(id) {
+  return request("POST", "/api/sessions/revoke", { id: id });
+}
+
+export async function revokeOtherSessions() {
+  return request("POST", "/api/sessions/revoke-others", {});
+}
+
+export async function securityEvents() {
+  return request("GET", "/api/account/events");
+}

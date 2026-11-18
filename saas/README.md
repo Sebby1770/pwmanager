@@ -71,3 +71,16 @@ Ceremonies are single-use and expire after 5 minutes. Browsers refuse IP
 addresses as RP ids, so for local testing open **http://localhost:8787**
 rather than 127.0.0.1. If `webauthn` is not installed, accounts with passkeys
 cannot sign in to the cloud (fail closed); local vaults are unaffected.
+
+## Master key changes and devices (3.4)
+
+| Route | Body | Notes |
+|-------|------|-------|
+| `POST /api/account/rekey` | `{auth_key, new_auth_key, new_kdf_salt, new_kdf_params, envelope, reason}` | Session + current `auth_key`. Atomic; refuses weaker KDFs, reused salts and envelopes not sealed with the new key; deletes old revisions; revokes other sessions; sets a new session cookie. Up to 8 MiB body. |
+| `GET /api/sessions` | — | `[{id, device, created_at, last_used_at, expires_at, current}]` |
+| `POST /api/sessions/revoke` | `{id}` | Own sessions only (404 otherwise). Revoking the current one clears the cookie. |
+| `POST /api/sessions/revoke-others` | `{}` | Keeps the calling session. |
+| `GET /api/account/events` | — | Last 50 security events (`vault_put` omitted); no IP hashes. |
+
+New accounts register with `{"alg": "argon2id", "m": 65536, "t": 3, "p": 4}`
+(see `saas/kdf.py` for the accepted ranges); PBKDF2 accounts keep working.

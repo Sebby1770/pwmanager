@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from saas.auth import (
     default_kdf_params,
+    legacy_kdf_params,
     dummy_kdf_salt,
     hash_auth_key,
     hash_ip,
@@ -58,6 +59,10 @@ class Database:
             columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(accounts)")}
             if "plan_event_at" not in columns:
                 self._conn.execute("ALTER TABLE accounts ADD COLUMN plan_event_at INTEGER")
+            session_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+            for column in ("device_label", "last_used_at"):
+                if column not in session_columns:
+                    self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
 
     def _load_or_create_pepper(self) -> bytes:
         with self._lock:
@@ -134,7 +139,7 @@ class Database:
         try:
             params = json.loads(account["kdf_params"])
         except (TypeError, json.JSONDecodeError):
-            params = default_kdf_params()
+            params = legacy_kdf_params()
         return {"kdf_salt": account["kdf_salt"], "kdf_params": params}
 
     def verify_login(self, email: str, auth_key: bytes) -> Optional[sqlite3.Row]:
@@ -213,26 +218,80 @@ class Database:
 
     # ------------------------------------------------------------------ sessions
 
-    def create_session(self, account_id: str, user_agent: str) -> str:
-        token, token_hash = new_session_token()
-        from saas.auth import hash_user_agent
+    def _insert_session(self, account_id: str, user_agent: str) -> str:
+        """Caller holds self._lock. Returns the raw token (only its hash is stored)."""
+        from saas.auth import device_label, hash_user_agent
 
-        sid = new_id()
+        token, token_hash = new_session_token()
+        now = isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO sessions (id, account_id, token_hash, expires_at, created_at, user_agent_hash,
+                                  device_label, last_used_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id(),
+                account_id,
+                token_hash,
+                session_expiry(),
+                now,
+                hash_user_agent(user_agent or "", self._pepper),
+                device_label(user_agent or ""),
+                now,
+            ),
+        )
+        return token
+
+    def create_session(self, account_id: str, user_agent: str) -> str:
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO sessions (id, account_id, token_hash, expires_at, created_at, user_agent_hash)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sid,
-                    account_id,
-                    token_hash,
-                    session_expiry(),
-                    isoformat(),
-                    hash_user_agent(user_agent or "", self._pepper),
-                ),
-            )
+            return self._insert_session(account_id, user_agent)
+
+    def rekey_account(
+        self,
+        account_id: str,
+        new_auth_key: bytes,
+        kdf_salt: str,
+        kdf_params: dict,
+        blob: Optional[Dict[str, Any]],
+        user_agent: str,
+    ) -> str:
+        """Swap the account to a new master key in one transaction.
+
+        Replaces the verifier, salt and KDF params; replaces the vault blob when
+        one is given; deletes every revision (they are sealed with the old key,
+        which is exactly what a password change after a leak must retire);
+        revokes every session and mints one new one. Returns its token.
+        """
+        verifier = hash_auth_key(new_auth_key)
+        params_json = json.dumps(kdf_params, separators=(",", ":"))
+        now = isoformat()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "UPDATE accounts SET auth_verifier = ?, kdf_salt = ?, kdf_params = ? WHERE id = ?",
+                    (verifier, kdf_salt, params_json, account_id),
+                )
+                self._conn.execute("DELETE FROM vault_revisions WHERE account_id = ?", (account_id,))
+                if blob is not None:
+                    updated = self._conn.execute(
+                        "UPDATE vault_blobs SET ciphertext = ?, nonce = ?, aad_version = ?, byte_size = ?,"
+                        " updated_at = ? WHERE account_id = ?",
+                        (blob["ct"], blob["nonce"], blob["v"], blob["size"], now, account_id),
+                    )
+                    if not updated.rowcount:
+                        self._conn.execute(
+                            "INSERT INTO vault_blobs (id, account_id, ciphertext, nonce, aad_version, byte_size,"
+                            " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (new_id(), account_id, blob["ct"], blob["nonce"], blob["v"], blob["size"], now),
+                        )
+                self._conn.execute("DELETE FROM sessions WHERE account_id = ?", (account_id,))
+                token = self._insert_session(account_id, user_agent)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
         return token
 
     def session_account(self, token: str) -> Optional[sqlite3.Row]:
@@ -242,7 +301,8 @@ class Database:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT a.*, s.id AS session_id, s.expires_at AS session_expires
+                SELECT a.*, s.id AS session_id, s.expires_at AS session_expires,
+                       s.last_used_at AS session_last_used
                 FROM sessions s
                 JOIN accounts a ON a.id = s.account_id
                 WHERE s.token_hash = ? AND a.deleted_at IS NULL
@@ -258,7 +318,51 @@ class Database:
         if expires < utcnow():
             self.revoke_session_token(token)
             return None
+        self._touch_session(row)
         return row
+
+    def _touch_session(self, row: sqlite3.Row) -> None:
+        """Record last use, at most once a minute per session (it is a write)."""
+        try:
+            last = parse_iso(row["session_last_used"]) if row["session_last_used"] else None
+        except Exception:
+            last = None
+        if last is not None and (utcnow() - last).total_seconds() < 60:
+            return
+        with self._lock:
+            self._conn.execute("UPDATE sessions SET last_used_at = ? WHERE id = ?", (isoformat(), row["session_id"]))
+
+    def list_sessions(self, account_id: str) -> List[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT id, device_label, created_at, last_used_at, expires_at FROM sessions"
+                " WHERE account_id = ? ORDER BY COALESCE(last_used_at, created_at) DESC",
+                (account_id,),
+            ).fetchall()
+
+    def revoke_account_session(self, account_id: str, session_id: str) -> bool:
+        """Revoke one of *this account's* sessions. False if it is not theirs."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM sessions WHERE id = ? AND account_id = ?", (session_id, account_id)
+            )
+        return bool(cur.rowcount)
+
+    def revoke_other_sessions(self, account_id: str, keep_session_id: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM sessions WHERE account_id = ? AND id != ?", (account_id, keep_session_id)
+            )
+        return cur.rowcount
+
+    def security_events(self, account_id: str, limit: int = 50) -> List[sqlite3.Row]:
+        # vault_put fires on every save; it would drown out what matters here.
+        with self._lock:
+            return self._conn.execute(
+                "SELECT event, at FROM audit_events WHERE account_id = ? AND event != 'vault_put'"
+                " ORDER BY at DESC, rowid DESC LIMIT ?",
+                (account_id, limit),
+            ).fetchall()
 
     def revoke_session_token(self, token: str) -> None:
         token_hash = hash_token(token)
@@ -422,7 +526,7 @@ def account_public(account: sqlite3.Row) -> Dict[str, Any]:
     try:
         kdf_params = json.loads(account["kdf_params"])
     except (TypeError, json.JSONDecodeError):
-        kdf_params = default_kdf_params()
+        kdf_params = legacy_kdf_params()
     return {
         "id": account["id"],
         "email": account["email"],
@@ -443,14 +547,9 @@ def blob_to_envelope(row: sqlite3.Row, kdf_salt: str, kdf_params: dict) -> Dict[
         "v": int(row["aad_version"]),
         "nonce": row["nonce"],
         "ct": row["ciphertext"],
-        "kdf": {
-            "alg": (kdf_params or {}).get("alg", "PBKDF2-HMAC-SHA256"),
-            "hash": (kdf_params or {}).get("hash", "SHA-256"),
-            "iterations": (kdf_params or {}).get("iterations", 600000),
-            "dk_len": (kdf_params or {}).get("dk_len", 64),
-            "salt": kdf_salt,
-            "email_mix": (kdf_params or {}).get("email_mix", "sha256(salt||email)"),
-        },
+        # The account's current params, so the envelope always says how to
+        # derive the key that opens it.
+        "kdf": {**(kdf_params or legacy_kdf_params()), "salt": kdf_salt},
         "byte_size": row["byte_size"],
         "updated_at": row["updated_at"],
         "id": row["id"],

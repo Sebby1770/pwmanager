@@ -2,6 +2,7 @@
  * AES-GCM envelope roundtrip for the SaaS client crypto module.
  *   node tests/js/saas_crypto.mjs
  */
+import "./argon2_node.mjs";
 import {
   deriveKeys,
   encryptVault,
@@ -21,7 +22,10 @@ const vault = {
   version: 1,
   entries: [{ id: "1", name: "demo", password: "not-uploaded-in-plaintext", totp_secret: "MFRGGZDF" }]
 };
-const envelope = await encryptVault(keys.vaultKey, vault, keys.saltB64);
+const envelope = await encryptVault(keys.vaultKey, vault, keys.saltB64, keys.kdfParams);
+if (envelope.kdf.alg !== "argon2id") {
+  throw new Error("new vaults must use Argon2id");
+}
 parseEnvelope(envelope);
 if (envelope.password || envelope.entries) {
   throw new Error("plaintext leaked into envelope");

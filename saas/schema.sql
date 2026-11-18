@@ -30,7 +30,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    user_agent_hash TEXT
+    user_agent_hash TEXT,
+    -- Coarse "Firefox on Linux" style label so users can recognise devices.
+    -- Never the raw User-Agent, never an IP address.
+    device_label TEXT,
+    last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);

@@ -17,7 +17,7 @@ python -m pwmanager                         # interactive CLI; vault.json in the
 python -m pwmanager --vault /tmp/x.vault.json add github --gen
 python -m saas                              # API + web on http://127.0.0.1:8787 (Stripe optional)
 python -m pytest -q                         # Python tests (Playwright e2e skip if no Chromium)
-node tests/js/run.mjs && node tests/js/saas_crypto.mjs && node tests/js/saas_vault.mjs   # JS tests
+for t in run saas_crypto saas_vault saas_kdf; do node tests/js/$t.mjs; done   # JS tests
 ```
 
 Stripe is disabled unless all four `PWMANAGER_STRIPE_*` env vars are set; the
@@ -30,9 +30,9 @@ API then returns 503 for checkout/webhook. Mark an account Pro in tests with
 2. CLI: the whole entry set is one AES-256-GCM blob (random 96-bit nonce per save); legacy Fernet vaults still open and are upgraded on save.
 3. CLI: an HMAC-SHA256 over version|kdf|cipher|salt|ciphertext (length-prefixed) binds the unencrypted header; a mismatch after a successful decrypt means tampering.
 4. KDF parameters in the CLI are constants, never read from the file; only the KDF *name* is, and a wrong name just fails to decrypt.
-5. Web: PBKDF2-SHA256, 600k iterations, salt = SHA-256(random 32-byte salt ‖ email) → 64 bytes.
-6. Web: bytes 0–31 are `vaultKey` (AES-GCM, never leaves the browser); bytes 32–63 are `authKey`.
-7. Web: the server stores only Argon2id(authKey) and the random salt; iterations are fixed client-side, so a server cannot downgrade them.
+5. Web (v2): Argon2id(password, SHA-256(random 32-byte salt ‖ email), 64 MiB, t=3, p=4) → 32-byte masterKey (vendored hash-wasm in `web/vendor/`).
+6. Web (v2): HKDF-SHA256(masterKey) → `vaultKey` (AES-GCM, never leaves the browser) and `authKey` (info strings differ). v1 = PBKDF2 600k, 64 bytes split; migrated on unlock.
+7. Web: the server stores only Argon2id(authKey), the salt and the params; the browser enforces KDF floors/ceilings and refuses a downgrade. `pwmanager/cloudkdf.py` is the Python mirror.
 8. Web: vault = AES-256-GCM(vaultKey, JSON) with AAD `pwmanager-vault-v1`, uploaded as `{v, nonce, ct, kdf}`; `envelope.py` rejects anything plaintext-shaped.
 9. Prelogin returns a deterministic HMAC-derived dummy salt for unknown emails so salts do not reveal which emails exist.
 10. Nothing derived from the master password other than `authKey` may reach the server, its logs, or error messages — keep it that way.

@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any, Dict, Mapping, Tuple
 
-from saas.config import KDF_ITERATIONS, KDF_ITERATIONS_MAX
+from saas import kdf as _kdf
 
 REQUIRED_KEYS = ("v", "nonce", "ct", "kdf")
 
@@ -108,20 +108,14 @@ def parse_envelope(payload: Any) -> Dict[str, Any]:
     kdf = payload["kdf"]
     if not isinstance(kdf, Mapping):
         raise EnvelopeError("kdf must be an object")
-    alg = str(kdf.get("alg") or kdf.get("name") or "").upper()
-    if alg not in {"PBKDF2", "PBKDF2-HMAC-SHA256"}:
-        raise EnvelopeError("kdf.alg must be PBKDF2-HMAC-SHA256")
-    raw_iterations = kdf.get("iterations")
-    if isinstance(raw_iterations, bool):
-        raise EnvelopeError("kdf.iterations must be an integer")
+    if isinstance(kdf.get("alg"), str) and kdf.get("alg", "").upper() == "PBKDF2":
+        kdf = {**kdf, "alg": _kdf.V1_ALG}
+    if "alg" not in kdf and "name" not in kdf:
+        raise EnvelopeError("kdf.alg is required")
     try:
-        iterations = int(raw_iterations)
-    except (TypeError, ValueError) as exc:
-        raise EnvelopeError("kdf.iterations must be an integer") from exc
-    if iterations < KDF_ITERATIONS:
-        raise EnvelopeError(f"kdf.iterations must be at least {KDF_ITERATIONS}")
-    if iterations > KDF_ITERATIONS_MAX:
-        raise EnvelopeError(f"kdf.iterations must be at most {KDF_ITERATIONS_MAX}")
+        params = _kdf.canonical(kdf)
+    except ValueError as exc:
+        raise EnvelopeError(str(exc)) from exc
     salt = kdf.get("salt")
     if not isinstance(salt, str):
         raise EnvelopeError("kdf.salt must be a base64 string")
@@ -132,14 +126,7 @@ def parse_envelope(payload: Any) -> Dict[str, Any]:
         "v": version_i,
         "nonce": payload["nonce"].strip(),
         "ct": payload["ct"].strip(),
-        "kdf": {
-            "alg": "PBKDF2-HMAC-SHA256",
-            "hash": "SHA-256",
-            "iterations": iterations,
-            "dk_len": 64,
-            "salt": salt.strip(),
-            "email_mix": "sha256(salt||email)",
-        },
+        "kdf": {**params, "salt": salt.strip()},
     }
     if "updated_at" in payload:
         try:

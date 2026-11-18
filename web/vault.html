@@ -7,7 +7,7 @@
 <meta name="description" content="Unlock or create a zero-knowledge pwmanager vault. Master passwords never leave this browser.">
 <meta name="color-scheme" content="dark light">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.stripe.com https://api.pwnedpasswords.com; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="saas.css">
 </head>
@@ -198,6 +198,30 @@
   </section>
 </main>
 
+<dialog class="account-dialog" id="password-dialog" aria-labelledby="password-heading">
+  <h2 id="password-heading">Change master password</h2>
+  <p class="fine">The vault is re-encrypted with a key from the new password (Argon2id). On the cloud account this happens in one step, older backups are deleted, and every other device has to sign in again.</p>
+  <form id="password-form">
+    <div class="field">
+      <label for="pw-current">Current master password</label>
+      <input id="pw-current" type="password" autocomplete="current-password" minlength="12" required>
+    </div>
+    <div class="field">
+      <label for="pw-new">New master password (min 12 characters)</label>
+      <input id="pw-new" type="password" autocomplete="new-password" minlength="12" required>
+    </div>
+    <div class="field">
+      <label for="pw-new2">Confirm new master password</label>
+      <input id="pw-new2" type="password" autocomplete="new-password" minlength="12" required>
+    </div>
+    <p id="pw-status" class="status" role="status"></p>
+    <div class="form-actions">
+      <button class="btn btn-brass" type="submit" id="pw-submit">Change password</button>
+      <button class="btn btn-ghost" type="button" id="pw-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog class="account-dialog" id="help-dialog" aria-labelledby="help-heading">
   <h2 id="help-heading">Vault keys</h2>
   <p class="fine">These shortcuts are ignored while you are typing in a field.</p>
@@ -233,6 +257,19 @@
     </div>
     <p id="passkey-status" class="status" role="status"></p>
   </section>
+  <section id="devices-section" class="passkey-section" hidden aria-labelledby="devices-heading">
+    <h3 id="devices-heading">Signed-in devices</h3>
+    <p class="fine">Each sign-in is listed by browser and system only. Revoking one ends that session; the vault on that device stays encrypted locally.</p>
+    <ul id="device-list" class="passkey-list"></ul>
+    <div class="form-actions">
+      <button type="button" class="btn btn-ghost" id="btn-revoke-others">Sign out everywhere else</button>
+    </div>
+    <h3 id="events-heading">Recent security events</h3>
+    <ul id="event-list" class="passkey-list event-list" aria-labelledby="events-heading"></ul>
+  </section>
+  <div class="form-actions">
+    <button type="button" class="btn btn-ghost" id="btn-change-password">Change master password</button>
+  </div>
   <div class="form-actions">
     <button type="button" class="btn btn-ghost" id="btn-logout">Sign out of cloud</button>
     <button type="button" class="btn btn-danger" id="btn-delete-account">Delete cloud account</button>
@@ -262,6 +299,7 @@
 </footer>
 <noscript><p class="wrap fine">The vault needs JavaScript so encryption can run in your browser.</p></noscript>
 <script src="wordlist.js"></script>
+<script src="vendor/hash-wasm-argon2-4.13.0.umd.min.js" integrity="sha384-ucC4sxuigvSaLeyhcJawckwyUdeGYHVtI5thKde7BmbSVGOVAfMvEilREY/G+pHi"></script>
 <script type="module" src="saas/vault-app.js"></script>
 </body>
 </html>
